@@ -568,7 +568,7 @@ namespace Oxide.Plugins
         // Track player movement for trespass warnings
         private void OnPlayerTick(BasePlayer player)
         {
-            if (!_config.HQ.EnableHQSafezones || player == null || player.IsNpc) return;
+            if (_config == null || _config.HQ == null || !_config.HQ.EnableHQSafezones || player == null || player.IsNpc) return;
 
             CheckTrespassWarning(player);
         }
@@ -897,6 +897,8 @@ namespace Oxide.Plugins
         // Get the HQ neighborhood config if position is within an HQ radius
         private ConfigData.NeighborhoodConfig GetHQAtPosition(Vector3 pos)
         {
+            if (_config == null || _config.Neighborhoods == null) return null;
+
             foreach (var hood in _config.Neighborhoods)
             {
                 if (hood.Type == NeighborhoodType.Neutral) continue;
