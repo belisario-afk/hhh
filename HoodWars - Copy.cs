@@ -271,7 +271,7 @@ namespace Oxide.Plugins
             });
 
             // Create HQ sphere markers
-            if (_config.HQ.ShowHQSpheres)
+            if (_config != null && _config.HQ != null && _config.HQ.ShowHQSpheres)
             {
                 CreateAllHQSpheres();
             }
@@ -322,7 +322,7 @@ namespace Oxide.Plugins
             if (player == null || privilege == null) return;
 
             // Check HQ authorization restrictions first
-            if (_config.HQ.EnableHQSafezones)
+            if (_config != null && _config.HQ != null && _config.HQ.EnableHQSafezones)
             {
                 var hqHood = GetHQAtPosition(privilege.transform.position);
                 if (hqHood != null)
@@ -439,7 +439,7 @@ namespace Oxide.Plugins
         // Block all damage in HQ safezones
         private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
         {
-            if (!_config.HQ.EnableHQSafezones || entity == null) return null;
+            if (_config == null || _config.HQ == null || !_config.HQ.EnableHQSafezones || entity == null) return null;
 
             // Check if entity is in an HQ safezone
             var hqHood = GetHQAtPosition(entity.transform.position);
@@ -462,7 +462,7 @@ namespace Oxide.Plugins
         // Block building for rivals in HQ zones and restrict TC placement
         private object CanBuild(Planner planner, Construction prefab, Construction.Target target)
         {
-            if (!_config.HQ.EnableHQSafezones || planner == null) return null;
+            if (_config == null || _config.HQ == null || !_config.HQ.EnableHQSafezones || planner == null) return null;
 
             var player = planner.GetOwnerPlayer();
             if (player == null) return null;
@@ -515,7 +515,7 @@ namespace Oxide.Plugins
         // Handle TC placement in HQ - register as HQ TC
         private void OnEntitySpawned(BaseNetworkable entity)
         {
-            if (!_config.HQ.EnableHQSafezones) return;
+            if (_config == null || _config.HQ == null || !_config.HQ.EnableHQSafezones) return;
 
             if (entity is BuildingPrivlidge tc)
             {
@@ -540,7 +540,7 @@ namespace Oxide.Plugins
         // Block taking items from HQ TC (only allow deposits)
         private object CanMoveItem(Item item, PlayerInventory playerInventory, ItemContainerId targetContainerId, int targetSlot, int amount)
         {
-            if (!_config.HQ.EnableHQSafezones || item == null || playerInventory == null) return null;
+            if (_config == null || _config.HQ == null || !_config.HQ.EnableHQSafezones || item == null || playerInventory == null) return null;
 
             // Check if item is coming FROM a TC container
             var sourceContainer = item.parent;
