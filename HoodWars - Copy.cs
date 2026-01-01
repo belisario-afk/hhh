@@ -339,8 +339,9 @@ namespace Oxide.Plugins
                         {
                             if (privilege != null && !privilege.IsDestroyed)
                             {
-                                // Remove the player from the authorized HashSet using RemoveWhere
-                                privilege.authorizedPlayers.RemoveWhere(x => x.userid == targetUserId);
+                                // Remove the player from the authorized HashSet
+                                // In latest Rust, authorizedPlayers is HashSet<ulong>
+                                privilege.authorizedPlayers.Remove(targetUserId);
                                 privilege.SendNetworkUpdate();
                             }
                         });
