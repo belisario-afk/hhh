@@ -334,19 +334,13 @@ namespace Oxide.Plugins
                     {
                         SendReply(player, GetMsg("HQ_NoAuth_Rival", player.UserIDString));
                         // Schedule deauthorization on next frame since we can't modify during this hook cleanly
+                        ulong targetUserId = player.userID;
                         timer.Once(0.1f, () => 
                         {
-                            if (privilege != null && !privilege.IsDestroyed && player != null)
+                            if (privilege != null && !privilege.IsDestroyed)
                             {
-                                // Find and remove the player from the authorized list
-                                for (int i = privilege.authorizedPlayers.Count - 1; i >= 0; i--)
-                                {
-                                    if (privilege.authorizedPlayers[i].userid == player.userID)
-                                    {
-                                        privilege.authorizedPlayers.RemoveAt(i);
-                                        break;
-                                    }
-                                }
+                                // Remove the player from the authorized HashSet using RemoveWhere
+                                privilege.authorizedPlayers.RemoveWhere(x => x.userid == targetUserId);
                                 privilege.SendNetworkUpdate();
                             }
                         });
