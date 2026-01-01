@@ -338,7 +338,15 @@ namespace Oxide.Plugins
                         {
                             if (privilege != null && !privilege.IsDestroyed && player != null)
                             {
-                                privilege.Deauthorize(player);
+                                // Find and remove the player from the authorized list
+                                for (int i = privilege.authorizedPlayers.Count - 1; i >= 0; i--)
+                                {
+                                    if (privilege.authorizedPlayers[i].userid == player.userID)
+                                    {
+                                        privilege.authorizedPlayers.RemoveAt(i);
+                                        break;
+                                    }
+                                }
                                 privilege.SendNetworkUpdate();
                             }
                         });
