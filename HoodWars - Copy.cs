@@ -5,6 +5,7 @@ using Newtonsoft.Json;
 using Oxide.Core;
 using Oxide.Core.Configuration;
 using Oxide.Core.Plugins;
+using Oxide.Game.Rust.Cui;
 using UnityEngine;
 
 namespace Oxide.Plugins
@@ -318,7 +319,11 @@ namespace Oxide.Plugins
                     {
                         SendReply(player, GetMsg("HQ_NoAuth_Rival", player.UserIDString));
                         // Remove player from authorized list if somehow added
-                        privilege.authorizedPlayers.RemoveAll(x => x.userid == player.userID);
+                        var toRemove = privilege.authorizedPlayers.FirstOrDefault(x => x.userid == player.userID);
+                        if (toRemove != null)
+                        {
+                            privilege.authorizedPlayers.Remove(toRemove);
+                        }
                         privilege.SendNetworkUpdate();
                         return;
                     }
@@ -938,6 +943,688 @@ namespace Oxide.Plugins
             {
                 Puts($"Reset gang data for {id}");
                 SaveData();
+            }
+        }
+
+        #endregion
+
+        #region Admin GUI
+
+        private const string AdminUIName = "HoodWars_AdminUI";
+        private const string AdminUIOverlay = "HoodWars_AdminOverlay";
+        private Dictionary<ulong, int> _adminUIPage = new Dictionary<ulong, int>();
+        private Dictionary<ulong, string> _adminUISection = new Dictionary<ulong, string>();
+
+        [ConsoleCommand("hoodwars.admin")]
+        private void ConsoleHoodAdmin(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            if (player == null) return;
+            if (!permission.UserHasPermission(player.UserIDString, PermAdmin) && !player.IsAdmin) return;
+
+            if (!arg.HasArgs()) return;
+
+            string action = arg.Args[0].ToLower();
+
+            switch (action)
+            {
+                case "close":
+                    DestroyAdminUI(player);
+                    break;
+
+                case "section":
+                    if (arg.Args.Length < 2) return;
+                    _adminUISection[player.userID] = arg.Args[1];
+                    _adminUIPage[player.userID] = 0;
+                    ShowAdminUI(player);
+                    break;
+
+                case "page":
+                    if (arg.Args.Length < 2) return;
+                    int page;
+                    if (int.TryParse(arg.Args[1], out page))
+                    {
+                        _adminUIPage[player.userID] = Math.Max(0, page);
+                        ShowAdminUI(player);
+                    }
+                    break;
+
+                case "sethqcenter":
+                    if (arg.Args.Length < 2) return;
+                    int hoodIndex;
+                    if (int.TryParse(arg.Args[1], out hoodIndex) && hoodIndex >= 0 && hoodIndex < _config.Neighborhoods.Count)
+                    {
+                        var hood = _config.Neighborhoods[hoodIndex];
+                        hood.HQCenterX = player.transform.position.x;
+                        hood.HQCenterZ = player.transform.position.z;
+                        SaveConfig();
+                        SendReply(player, $"<color=#55ff55>SUCCESS:</color> HQ center for {hood.Name} set to your current position ({hood.HQCenterX:F1}, {hood.HQCenterZ:F1})");
+                        ShowAdminUI(player);
+                    }
+                    break;
+
+                case "sethqradius":
+                    if (arg.Args.Length < 3) return;
+                    int hIndex;
+                    float radius;
+                    if (int.TryParse(arg.Args[1], out hIndex) && float.TryParse(arg.Args[2], out radius) && hIndex >= 0 && hIndex < _config.Neighborhoods.Count)
+                    {
+                        _config.Neighborhoods[hIndex].HQRadius = Math.Max(10f, radius);
+                        SaveConfig();
+                        SendReply(player, $"<color=#55ff55>SUCCESS:</color> HQ radius updated to {radius}m");
+                        ShowAdminUI(player);
+                    }
+                    break;
+
+                case "togglesafezone":
+                    _config.HQ.EnableHQSafezones = !_config.HQ.EnableHQSafezones;
+                    SaveConfig();
+                    SendReply(player, $"<color=#55ff55>SUCCESS:</color> HQ Safezones are now {(_config.HQ.EnableHQSafezones ? "ENABLED" : "DISABLED")}");
+                    ShowAdminUI(player);
+                    break;
+
+                case "setwarninginterval":
+                    if (arg.Args.Length < 2) return;
+                    float interval;
+                    if (float.TryParse(arg.Args[1], out interval))
+                    {
+                        _config.HQ.TrespassWarningInterval = Math.Max(5f, interval);
+                        SaveConfig();
+                        SendReply(player, $"<color=#55ff55>SUCCESS:</color> Trespass warning interval set to {interval}s");
+                        ShowAdminUI(player);
+                    }
+                    break;
+
+                case "addhotelitem":
+                    if (arg.Args.Length < 2) return;
+                    string itemToAdd = arg.Args[1];
+                    if (!_config.HQ.AllowedHotelItems.Contains(itemToAdd))
+                    {
+                        _config.HQ.AllowedHotelItems.Add(itemToAdd);
+                        SaveConfig();
+                        SendReply(player, $"<color=#55ff55>SUCCESS:</color> Added '{itemToAdd}' to allowed hotel items");
+                    }
+                    ShowAdminUI(player);
+                    break;
+
+                case "removehotelitem":
+                    if (arg.Args.Length < 2) return;
+                    int itemIndex;
+                    if (int.TryParse(arg.Args[1], out itemIndex) && itemIndex >= 0 && itemIndex < _config.HQ.AllowedHotelItems.Count)
+                    {
+                        string removed = _config.HQ.AllowedHotelItems[itemIndex];
+                        _config.HQ.AllowedHotelItems.RemoveAt(itemIndex);
+                        SaveConfig();
+                        SendReply(player, $"<color=#55ff55>SUCCESS:</color> Removed '{removed}' from allowed hotel items");
+                        ShowAdminUI(player);
+                    }
+                    break;
+
+                case "setrevealduration":
+                    if (arg.Args.Length < 2) return;
+                    float duration;
+                    if (float.TryParse(arg.Args[1], out duration))
+                    {
+                        _config.General.RevealDuration = Math.Max(10f, duration);
+                        SaveConfig();
+                        SendReply(player, $"<color=#55ff55>SUCCESS:</color> Reveal duration set to {duration}s");
+                        ShowAdminUI(player);
+                    }
+                    break;
+
+                case "setproximitydist":
+                    if (arg.Args.Length < 2) return;
+                    float dist;
+                    if (float.TryParse(arg.Args[1], out dist))
+                    {
+                        _config.General.ProximityDistance = Math.Max(1f, dist);
+                        SaveConfig();
+                        SendReply(player, $"<color=#55ff55>SUCCESS:</color> Proximity distance set to {dist}m");
+                        ShowAdminUI(player);
+                    }
+                    break;
+
+                case "togglekillreveal":
+                    _config.General.KillReveal = !_config.General.KillReveal;
+                    SaveConfig();
+                    SendReply(player, $"<color=#55ff55>SUCCESS:</color> Kill reveal is now {(_config.General.KillReveal ? "ENABLED" : "DISABLED")}");
+                    ShowAdminUI(player);
+                    break;
+
+                case "setbounty":
+                    if (arg.Args.Length < 2) return;
+                    int bounty;
+                    if (int.TryParse(arg.Args[1], out bounty))
+                    {
+                        _config.General.BountyAmount = Math.Max(0, bounty);
+                        SaveConfig();
+                        SendReply(player, $"<color=#55ff55>SUCCESS:</color> Bounty amount set to {bounty} scrap");
+                        ShowAdminUI(player);
+                    }
+                    break;
+
+                case "clearhqtc":
+                    if (arg.Args.Length < 2) return;
+                    int clearIndex;
+                    if (int.TryParse(arg.Args[1], out clearIndex) && clearIndex >= 0 && clearIndex < _config.Neighborhoods.Count)
+                    {
+                        var hood = _config.Neighborhoods[clearIndex];
+                        if (_hqToolCupboards.Remove(hood.Type))
+                        {
+                            SendReply(player, $"<color=#55ff55>SUCCESS:</color> Cleared HQ TC registration for {hood.Name}");
+                        }
+                        ShowAdminUI(player);
+                    }
+                    break;
+            }
+        }
+
+        private void ShowAdminUI(BasePlayer player)
+        {
+            DestroyAdminUI(player);
+
+            string section = _adminUISection.ContainsKey(player.userID) ? _adminUISection[player.userID] : "main";
+            int page = _adminUIPage.ContainsKey(player.userID) ? _adminUIPage[player.userID] : 0;
+
+            var elements = new CuiElementContainer();
+
+            // Main panel background
+            elements.Add(new CuiPanel
+            {
+                Image = { Color = "0.1 0.1 0.1 0.95" },
+                RectTransform = { AnchorMin = "0.15 0.15", AnchorMax = "0.85 0.85" },
+                CursorEnabled = true
+            }, "Overlay", AdminUIName);
+
+            // Header
+            elements.Add(new CuiPanel
+            {
+                Image = { Color = "0.2 0.2 0.2 1" },
+                RectTransform = { AnchorMin = "0 0.9", AnchorMax = "1 1" }
+            }, AdminUIName, "Header");
+
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = "HOODWARS ADMIN PANEL", FontSize = 20, Align = TextAnchor.MiddleCenter, Color = "1 1 1 1" },
+                RectTransform = { AnchorMin = "0 0", AnchorMax = "1 1" }
+            }, "Header");
+
+            // Close button
+            elements.Add(new CuiButton
+            {
+                Button = { Color = "0.8 0.2 0.2 1", Command = "hoodwars.admin close" },
+                RectTransform = { AnchorMin = "0.92 0.2", AnchorMax = "0.98 0.8" },
+                Text = { Text = "X", FontSize = 16, Align = TextAnchor.MiddleCenter }
+            }, "Header");
+
+            // Navigation tabs
+            AddNavTab(elements, "main", "Main Menu", "0.01 0.82", "0.15 0.88", section == "main");
+            AddNavTab(elements, "hq", "HQ Settings", "0.16 0.82", "0.30 0.88", section == "hq");
+            AddNavTab(elements, "neighborhoods", "Neighborhoods", "0.31 0.82", "0.48 0.88", section == "neighborhoods");
+            AddNavTab(elements, "hotelitems", "Hotel Items", "0.49 0.82", "0.63 0.88", section == "hotelitems");
+            AddNavTab(elements, "general", "General", "0.64 0.82", "0.78 0.88", section == "general");
+
+            // Content area
+            elements.Add(new CuiPanel
+            {
+                Image = { Color = "0.15 0.15 0.15 1" },
+                RectTransform = { AnchorMin = "0.01 0.05", AnchorMax = "0.99 0.80" }
+            }, AdminUIName, "Content");
+
+            switch (section)
+            {
+                case "main":
+                    AddMainMenuContent(elements);
+                    break;
+                case "hq":
+                    AddHQSettingsContent(elements);
+                    break;
+                case "neighborhoods":
+                    AddNeighborhoodsContent(elements, page);
+                    break;
+                case "hotelitems":
+                    AddHotelItemsContent(elements, page);
+                    break;
+                case "general":
+                    AddGeneralSettingsContent(elements);
+                    break;
+            }
+
+            CuiHelper.AddUi(player, elements);
+        }
+
+        private void AddNavTab(CuiElementContainer elements, string section, string label, string anchorMin, string anchorMax, bool active)
+        {
+            string color = active ? "0.3 0.5 0.3 1" : "0.25 0.25 0.25 1";
+            elements.Add(new CuiButton
+            {
+                Button = { Color = color, Command = $"hoodwars.admin section {section}" },
+                RectTransform = { AnchorMin = anchorMin, AnchorMax = anchorMax },
+                Text = { Text = label, FontSize = 11, Align = TextAnchor.MiddleCenter }
+            }, AdminUIName);
+        }
+
+        private void AddMainMenuContent(CuiElementContainer elements)
+        {
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = "Welcome to HoodWars Admin Panel", FontSize = 18, Align = TextAnchor.MiddleCenter, Color = "1 1 1 1" },
+                RectTransform = { AnchorMin = "0 0.8", AnchorMax = "1 0.95" }
+            }, "Content");
+
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = "Use the tabs above to configure different aspects of the plugin:\n\n" +
+                               "• <color=#55ff55>HQ Settings</color> - Configure safezone options and warnings\n" +
+                               "• <color=#55ff55>Neighborhoods</color> - Set HQ centers and radius for each gang\n" +
+                               "• <color=#55ff55>Hotel Items</color> - Manage allowed items in hotel rooms\n" +
+                               "• <color=#55ff55>General</color> - Configure reveal duration, proximity, bounty\n\n" +
+                               "Tip: Stand at your desired HQ location and use 'Set to My Position' to configure HQ centers.",
+                        FontSize = 14, Align = TextAnchor.MiddleCenter, Color = "0.9 0.9 0.9 1" },
+                RectTransform = { AnchorMin = "0.05 0.2", AnchorMax = "0.95 0.75" }
+            }, "Content");
+
+            // Quick stats
+            int totalPlayers = _storedData.Players.Count;
+            int totalHQs = _hqToolCupboards.Count;
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = $"Players: {totalPlayers} | Active HQ TCs: {totalHQs}/4 | Safezones: {(_config.HQ.EnableHQSafezones ? "ON" : "OFF")}", 
+                        FontSize = 12, Align = TextAnchor.MiddleCenter, Color = "0.7 0.7 0.7 1" },
+                RectTransform = { AnchorMin = "0 0.05", AnchorMax = "1 0.15" }
+            }, "Content");
+        }
+
+        private void AddHQSettingsContent(CuiElementContainer elements)
+        {
+            float y = 0.85f;
+            float rowHeight = 0.12f;
+
+            // Enable Safezones toggle
+            AddSettingRow(elements, ref y, rowHeight, "HQ Safezones", 
+                _config.HQ.EnableHQSafezones ? "ENABLED" : "DISABLED",
+                _config.HQ.EnableHQSafezones ? "0.3 0.6 0.3 1" : "0.6 0.3 0.3 1",
+                "hoodwars.admin togglesafezone");
+
+            // Trespass Warning Interval
+            AddSettingRowWithInput(elements, ref y, rowHeight, "Trespass Warning Interval",
+                $"{_config.HQ.TrespassWarningInterval}s",
+                "hoodwars.admin setwarninginterval");
+
+            // Info text
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = "When safezones are enabled:\n" +
+                               "• No damage can be dealt inside HQ radius\n" +
+                               "• Only gang members can build (hotel items only)\n" +
+                               "• HQ TC is indestructible (deposit only)\n" +
+                               "• Rivals receive trespass warnings",
+                        FontSize = 12, Align = TextAnchor.MiddleLeft, Color = "0.7 0.7 0.7 1" },
+                RectTransform = { AnchorMin = "0.05 0.1", AnchorMax = "0.95 0.45" }
+            }, "Content");
+        }
+
+        private void AddNeighborhoodsContent(CuiElementContainer elements, int page)
+        {
+            int itemsPerPage = 2;
+            int totalPages = (int)Math.Ceiling(_config.Neighborhoods.Count / (float)itemsPerPage);
+            int startIndex = page * itemsPerPage;
+
+            float y = 0.88f;
+
+            for (int i = startIndex; i < Math.Min(startIndex + itemsPerPage, _config.Neighborhoods.Count); i++)
+            {
+                var hood = _config.Neighborhoods[i];
+                
+                // Hood name header
+                elements.Add(new CuiPanel
+                {
+                    Image = { Color = "0.2 0.2 0.2 1" },
+                    RectTransform = { AnchorMin = $"0.02 {y - 0.38f}", AnchorMax = $"0.98 {y}" }
+                }, "Content", $"Hood_{i}");
+
+                Color hoodColor = Color.white;
+                if (!string.IsNullOrEmpty(hood.HexColor))
+                {
+                    ColorUtility.TryParseHtmlString(hood.HexColor, out hoodColor);
+                }
+                
+                elements.Add(new CuiLabel
+                {
+                    Text = { Text = hood.Name, FontSize = 14, Align = TextAnchor.MiddleLeft, Color = $"{hoodColor.r} {hoodColor.g} {hoodColor.b} 1" },
+                    RectTransform = { AnchorMin = "0.02 0.75", AnchorMax = "0.5 0.95" }
+                }, $"Hood_{i}");
+
+                // HQ Status
+                bool hasTC = _hqToolCupboards.ContainsKey(hood.Type);
+                elements.Add(new CuiLabel
+                {
+                    Text = { Text = $"HQ TC: {(hasTC ? "Registered" : "Not Set")}", FontSize = 11, Align = TextAnchor.MiddleRight, 
+                            Color = hasTC ? "0.3 0.8 0.3 1" : "0.8 0.3 0.3 1" },
+                    RectTransform = { AnchorMin = "0.5 0.75", AnchorMax = "0.98 0.95" }
+                }, $"Hood_{i}");
+
+                // HQ Center
+                elements.Add(new CuiLabel
+                {
+                    Text = { Text = $"HQ Center: ({hood.HQCenterX:F0}, {hood.HQCenterZ:F0})", FontSize = 11, Align = TextAnchor.MiddleLeft, Color = "0.8 0.8 0.8 1" },
+                    RectTransform = { AnchorMin = "0.02 0.5", AnchorMax = "0.4 0.7" }
+                }, $"Hood_{i}");
+
+                // Set to my position button
+                elements.Add(new CuiButton
+                {
+                    Button = { Color = "0.3 0.4 0.5 1", Command = $"hoodwars.admin sethqcenter {i}" },
+                    RectTransform = { AnchorMin = "0.42 0.52", AnchorMax = "0.68 0.68" },
+                    Text = { Text = "Set to My Position", FontSize = 10, Align = TextAnchor.MiddleCenter }
+                }, $"Hood_{i}");
+
+                // HQ Radius
+                elements.Add(new CuiLabel
+                {
+                    Text = { Text = $"HQ Radius: {hood.HQRadius}m", FontSize = 11, Align = TextAnchor.MiddleLeft, Color = "0.8 0.8 0.8 1" },
+                    RectTransform = { AnchorMin = "0.02 0.25", AnchorMax = "0.3 0.45" }
+                }, $"Hood_{i}");
+
+                // Radius buttons
+                AddRadiusButton(elements, $"Hood_{i}", i, 25, "0.32 0.27", "0.42 0.43");
+                AddRadiusButton(elements, $"Hood_{i}", i, 50, "0.44 0.27", "0.54 0.43");
+                AddRadiusButton(elements, $"Hood_{i}", i, 75, "0.56 0.27", "0.66 0.43");
+                AddRadiusButton(elements, $"Hood_{i}", i, 100, "0.68 0.27", "0.78 0.43");
+
+                // Clear HQ TC button
+                if (hasTC)
+                {
+                    elements.Add(new CuiButton
+                    {
+                        Button = { Color = "0.6 0.2 0.2 1", Command = $"hoodwars.admin clearhqtc {i}" },
+                        RectTransform = { AnchorMin = "0.02 0.05", AnchorMax = "0.25 0.2" },
+                        Text = { Text = "Clear HQ TC", FontSize = 10, Align = TextAnchor.MiddleCenter }
+                    }, $"Hood_{i}");
+                }
+
+                y -= 0.42f;
+            }
+
+            // Pagination
+            if (totalPages > 1)
+            {
+                AddPagination(elements, page, totalPages);
+            }
+        }
+
+        private void AddRadiusButton(CuiElementContainer elements, string parent, int hoodIndex, int radius, string anchorMin, string anchorMax)
+        {
+            elements.Add(new CuiButton
+            {
+                Button = { Color = "0.25 0.35 0.25 1", Command = $"hoodwars.admin sethqradius {hoodIndex} {radius}" },
+                RectTransform = { AnchorMin = anchorMin, AnchorMax = anchorMax },
+                Text = { Text = $"{radius}m", FontSize = 10, Align = TextAnchor.MiddleCenter }
+            }, parent);
+        }
+
+        private void AddHotelItemsContent(CuiElementContainer elements, int page)
+        {
+            int itemsPerPage = 8;
+            int totalItems = _config.HQ.AllowedHotelItems.Count;
+            int totalPages = (int)Math.Ceiling(totalItems / (float)itemsPerPage);
+            int startIndex = page * itemsPerPage;
+
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = "Allowed Hotel Items (items players can place in HQ)", FontSize = 12, Align = TextAnchor.MiddleLeft, Color = "0.9 0.9 0.9 1" },
+                RectTransform = { AnchorMin = "0.02 0.88", AnchorMax = "0.98 0.98" }
+            }, "Content");
+
+            float y = 0.82f;
+            float rowHeight = 0.09f;
+
+            for (int i = startIndex; i < Math.Min(startIndex + itemsPerPage, totalItems); i++)
+            {
+                string item = _config.HQ.AllowedHotelItems[i];
+                
+                elements.Add(new CuiPanel
+                {
+                    Image = { Color = "0.2 0.2 0.2 0.8" },
+                    RectTransform = { AnchorMin = $"0.02 {y - rowHeight}", AnchorMax = $"0.98 {y}" }
+                }, "Content", $"Item_{i}");
+
+                elements.Add(new CuiLabel
+                {
+                    Text = { Text = item, FontSize = 11, Align = TextAnchor.MiddleLeft, Color = "0.9 0.9 0.9 1" },
+                    RectTransform = { AnchorMin = "0.02 0", AnchorMax = "0.8 1" }
+                }, $"Item_{i}");
+
+                elements.Add(new CuiButton
+                {
+                    Button = { Color = "0.6 0.2 0.2 1", Command = $"hoodwars.admin removehotelitem {i}" },
+                    RectTransform = { AnchorMin = "0.85 0.15", AnchorMax = "0.98 0.85" },
+                    Text = { Text = "Remove", FontSize = 10, Align = TextAnchor.MiddleCenter }
+                }, $"Item_{i}");
+
+                y -= rowHeight + 0.01f;
+            }
+
+            // Add item info
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = "To add items, use chat: /hoodadmin additem <prefab_name>", FontSize = 10, Align = TextAnchor.MiddleCenter, Color = "0.6 0.6 0.6 1" },
+                RectTransform = { AnchorMin = "0 0.02", AnchorMax = "1 0.08" }
+            }, "Content");
+
+            // Pagination
+            if (totalPages > 1)
+            {
+                AddPagination(elements, page, totalPages);
+            }
+        }
+
+        private void AddGeneralSettingsContent(CuiElementContainer elements)
+        {
+            float y = 0.88f;
+            float rowHeight = 0.12f;
+
+            // Reveal Duration
+            AddSettingRowWithInput(elements, ref y, rowHeight, "Identity Reveal Duration",
+                $"{_config.General.RevealDuration}s",
+                "hoodwars.admin setrevealduration");
+
+            // Proximity Distance
+            AddSettingRowWithInput(elements, ref y, rowHeight, "Proximity Reveal Distance",
+                $"{_config.General.ProximityDistance}m",
+                "hoodwars.admin setproximitydist");
+
+            // Kill Reveal toggle
+            AddSettingRow(elements, ref y, rowHeight, "Kill Reveal",
+                _config.General.KillReveal ? "ENABLED" : "DISABLED",
+                _config.General.KillReveal ? "0.3 0.6 0.3 1" : "0.6 0.3 0.3 1",
+                "hoodwars.admin togglekillreveal");
+
+            // Bounty Amount
+            AddSettingRowWithInput(elements, ref y, rowHeight, "Rat TC Bounty Amount",
+                $"{_config.General.BountyAmount} scrap",
+                "hoodwars.admin setbounty");
+
+            // Reputation toggle
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = $"Reputation System: {(_config.General.UseReputation ? "ENABLED" : "DISABLED")}", 
+                        FontSize = 12, Align = TextAnchor.MiddleLeft, Color = "0.7 0.7 0.7 1" },
+                RectTransform = { AnchorMin = "0.02 0.1", AnchorMax = "0.98 0.22" }
+            }, "Content");
+        }
+
+        private void AddSettingRow(CuiElementContainer elements, ref float y, float rowHeight, string label, string value, string buttonColor, string command)
+        {
+            elements.Add(new CuiPanel
+            {
+                Image = { Color = "0.2 0.2 0.2 0.8" },
+                RectTransform = { AnchorMin = $"0.02 {y - rowHeight}", AnchorMax = $"0.98 {y}" }
+            }, "Content", $"Setting_{label}");
+
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = label, FontSize = 12, Align = TextAnchor.MiddleLeft, Color = "0.9 0.9 0.9 1" },
+                RectTransform = { AnchorMin = "0.02 0", AnchorMax = "0.5 1" }
+            }, $"Setting_{label}");
+
+            elements.Add(new CuiButton
+            {
+                Button = { Color = buttonColor, Command = command },
+                RectTransform = { AnchorMin = "0.7 0.15", AnchorMax = "0.98 0.85" },
+                Text = { Text = value, FontSize = 11, Align = TextAnchor.MiddleCenter }
+            }, $"Setting_{label}");
+
+            y -= rowHeight + 0.02f;
+        }
+
+        private void AddSettingRowWithInput(CuiElementContainer elements, ref float y, float rowHeight, string label, string currentValue, string command)
+        {
+            elements.Add(new CuiPanel
+            {
+                Image = { Color = "0.2 0.2 0.2 0.8" },
+                RectTransform = { AnchorMin = $"0.02 {y - rowHeight}", AnchorMax = $"0.98 {y}" }
+            }, "Content", $"Setting_{label}");
+
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = label, FontSize = 12, Align = TextAnchor.MiddleLeft, Color = "0.9 0.9 0.9 1" },
+                RectTransform = { AnchorMin = "0.02 0", AnchorMax = "0.5 1" }
+            }, $"Setting_{label}");
+
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = $"Current: {currentValue}", FontSize = 11, Align = TextAnchor.MiddleRight, Color = "0.7 0.7 0.7 1" },
+                RectTransform = { AnchorMin = "0.5 0", AnchorMax = "0.98 1" }
+            }, $"Setting_{label}");
+
+            // Note: Full input fields require more complex CUI implementation
+            // Players can use chat commands for now: type the value in chat
+            
+            y -= rowHeight + 0.02f;
+        }
+
+        private void AddPagination(CuiElementContainer elements, int currentPage, int totalPages)
+        {
+            // Previous button
+            if (currentPage > 0)
+            {
+                elements.Add(new CuiButton
+                {
+                    Button = { Color = "0.3 0.3 0.4 1", Command = $"hoodwars.admin page {currentPage - 1}" },
+                    RectTransform = { AnchorMin = "0.3 0.01", AnchorMax = "0.4 0.06" },
+                    Text = { Text = "< Prev", FontSize = 10, Align = TextAnchor.MiddleCenter }
+                }, "Content");
+            }
+
+            // Page indicator
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = $"Page {currentPage + 1} / {totalPages}", FontSize = 10, Align = TextAnchor.MiddleCenter, Color = "0.7 0.7 0.7 1" },
+                RectTransform = { AnchorMin = "0.42 0.01", AnchorMax = "0.58 0.06" }
+            }, "Content");
+
+            // Next button
+            if (currentPage < totalPages - 1)
+            {
+                elements.Add(new CuiButton
+                {
+                    Button = { Color = "0.3 0.3 0.4 1", Command = $"hoodwars.admin page {currentPage + 1}" },
+                    RectTransform = { AnchorMin = "0.6 0.01", AnchorMax = "0.7 0.06" },
+                    Text = { Text = "Next >", FontSize = 10, Align = TextAnchor.MiddleCenter }
+                }, "Content");
+            }
+        }
+
+        private void DestroyAdminUI(BasePlayer player)
+        {
+            CuiHelper.DestroyUi(player, AdminUIName);
+        }
+
+        // Chat command for admin panel and helper commands
+        [ChatCommand("hoodadmin")]
+        private void CmdHoodAdmin(BasePlayer player, string cmd, string[] args)
+        {
+            if (!permission.UserHasPermission(player.UserIDString, PermAdmin) && !player.IsAdmin)
+            {
+                SendReply(player, "<color=#ff4444>ACCESS DENIED:</color> You don't have permission.");
+                return;
+            }
+
+            if (args.Length == 0)
+            {
+                // Open the GUI
+                _adminUIPage[player.userID] = 0;
+                _adminUISection[player.userID] = "main";
+                ShowAdminUI(player);
+                return;
+            }
+
+            string action = args[0].ToLower();
+
+            switch (action)
+            {
+                case "additem":
+                    if (args.Length < 2)
+                    {
+                        SendReply(player, "Usage: /hoodadmin additem <prefab_name>");
+                        return;
+                    }
+                    string itemName = args[1];
+                    if (!_config.HQ.AllowedHotelItems.Contains(itemName))
+                    {
+                        _config.HQ.AllowedHotelItems.Add(itemName);
+                        SaveConfig();
+                        SendReply(player, $"<color=#55ff55>SUCCESS:</color> Added '{itemName}' to allowed hotel items.");
+                    }
+                    else
+                    {
+                        SendReply(player, $"<color=#ffaa00>INFO:</color> '{itemName}' is already in the list.");
+                    }
+                    break;
+
+                case "setradius":
+                    if (args.Length < 3)
+                    {
+                        SendReply(player, "Usage: /hoodadmin setradius <gang_index> <radius>");
+                        return;
+                    }
+                    int idx;
+                    float rad;
+                    if (int.TryParse(args[1], out idx) && float.TryParse(args[2], out rad) && idx >= 0 && idx < _config.Neighborhoods.Count)
+                    {
+                        _config.Neighborhoods[idx].HQRadius = Math.Max(10f, rad);
+                        SaveConfig();
+                        SendReply(player, $"<color=#55ff55>SUCCESS:</color> Set {_config.Neighborhoods[idx].Name} HQ radius to {rad}m");
+                    }
+                    break;
+
+                case "setwarning":
+                    if (args.Length < 2)
+                    {
+                        SendReply(player, "Usage: /hoodadmin setwarning <seconds>");
+                        return;
+                    }
+                    float warn;
+                    if (float.TryParse(args[1], out warn))
+                    {
+                        _config.HQ.TrespassWarningInterval = Math.Max(5f, warn);
+                        SaveConfig();
+                        SendReply(player, $"<color=#55ff55>SUCCESS:</color> Trespass warning interval set to {warn}s");
+                    }
+                    break;
+
+                case "help":
+                    SendReply(player, "<color=#55ff55>HoodWars Admin Commands:</color>\n" +
+                                     "/hoodadmin - Open admin GUI\n" +
+                                     "/hoodadmin additem <prefab> - Add hotel item\n" +
+                                     "/hoodadmin setradius <idx> <meters> - Set HQ radius\n" +
+                                     "/hoodadmin setwarning <seconds> - Set warning interval");
+                    break;
+
+                default:
+                    SendReply(player, "Unknown command. Use /hoodadmin help for commands.");
+                    break;
             }
         }
 
