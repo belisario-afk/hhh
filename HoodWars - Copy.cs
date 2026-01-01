@@ -21,6 +21,8 @@ namespace Oxide.Plugins
 
         private Dictionary<ulong, float> _spottedPlayers = new Dictionary<ulong, float>();
         private Dictionary<NetworkableId, MapMarkerGenericRadius> _activeMarkers = new Dictionary<NetworkableId, MapMarkerGenericRadius>();
+        private Dictionary<ulong, Dictionary<NeighborhoodType, float>> _trespassWarningCooldowns = new Dictionary<ulong, Dictionary<NeighborhoodType, float>>();
+        private Dictionary<NeighborhoodType, NetworkableId> _hqToolCupboards = new Dictionary<NeighborhoodType, NetworkableId>();
         
         // Timer for periodic updates
         private Timer _identityTimer;
@@ -49,6 +51,9 @@ namespace Oxide.Plugins
             [JsonProperty("Chat Settings")]
             public ChatSettings Chat { get; set; }
 
+            [JsonProperty("HQ Settings")]
+            public HQSettings HQ { get; set; }
+
             public class GeneralSettings
             {
                 [JsonProperty("Identity Reveal Duration (Seconds)")]
@@ -76,6 +81,44 @@ namespace Oxide.Plugins
                 public float MinZ { get; set; }
                 public float MaxZ { get; set; }
                 public string HexColor { get; set; }
+
+                [JsonProperty("HQ Center X")]
+                public float HQCenterX { get; set; }
+
+                [JsonProperty("HQ Center Z")]
+                public float HQCenterZ { get; set; }
+
+                [JsonProperty("HQ Radius (Meters)")]
+                public float HQRadius { get; set; } = 50f;
+            }
+
+            public class HQSettings
+            {
+                [JsonProperty("Enable HQ Safezones")]
+                public bool EnableHQSafezones { get; set; } = true;
+
+                [JsonProperty("Trespass Warning Interval (Seconds)")]
+                public float TrespassWarningInterval { get; set; } = 30f;
+
+                [JsonProperty("Allowed Hotel Items (Short Prefab Names)")]
+                public List<string> AllowedHotelItems { get; set; } = new List<string>
+                {
+                    "box.wooden.large",
+                    "box.wooden",
+                    "sleepingbag_leather_deployed",
+                    "bed_deployed",
+                    "small_stash_deployed",
+                    "rug.deployed",
+                    "rug.bear.deployed",
+                    "furnace",
+                    "campfire",
+                    "workbench1.deployed",
+                    "research.table.deployed",
+                    "mixingtable.deployed",
+                    "locker.deployed",
+                    "fridge.deployed",
+                    "repairbench_deployed"
+                };
             }
 
             public class MarkerSettings
@@ -120,17 +163,19 @@ namespace Oxide.Plugins
         protected override void LoadDefaultConfig()
         {
             // For a 2100 map, coordinates range from -1050 to 1050
+            // HQ centers are in the middle of each quadrant
             _config = new ConfigData
             {
                 General = new ConfigData.GeneralSettings(),
                 Markers = new ConfigData.MarkerSettings(),
                 Chat = new ConfigData.ChatSettings(),
+                HQ = new ConfigData.HQSettings(),
                 Neighborhoods = new List<ConfigData.NeighborhoodConfig>
                 {
-                    new ConfigData.NeighborhoodConfig { Name = "Westside Pirus", Type = NeighborhoodType.West, MinX = -1050, MaxX = 0, MinZ = 0, MaxZ = 1050, HexColor = "#ff4444" },
-                    new ConfigData.NeighborhoodConfig { Name = "Northside Vagos", Type = NeighborhoodType.North, MinX = 0, MaxX = 1050, MinZ = 0, MaxZ = 1050, HexColor = "#ccff33" },
-                    new ConfigData.NeighborhoodConfig { Name = "Southside Sureños", Type = NeighborhoodType.South, MinX = -1050, MaxX = 0, MinZ = -1050, MaxZ = 0, HexColor = "#3366ff" },
-                    new ConfigData.NeighborhoodConfig { Name = "Eastside Disciples", Type = NeighborhoodType.East, MinX = 0, MaxX = 1050, MinZ = -1050, MaxZ = 0, HexColor = "#444444" }
+                    new ConfigData.NeighborhoodConfig { Name = "Westside Pirus", Type = NeighborhoodType.West, MinX = -1050, MaxX = 0, MinZ = 0, MaxZ = 1050, HexColor = "#ff4444", HQCenterX = -525, HQCenterZ = 525, HQRadius = 50 },
+                    new ConfigData.NeighborhoodConfig { Name = "Northside Vagos", Type = NeighborhoodType.North, MinX = 0, MaxX = 1050, MinZ = 0, MaxZ = 1050, HexColor = "#ccff33", HQCenterX = 525, HQCenterZ = 525, HQRadius = 50 },
+                    new ConfigData.NeighborhoodConfig { Name = "Southside Sureños", Type = NeighborhoodType.South, MinX = -1050, MaxX = 0, MinZ = -1050, MaxZ = 0, HexColor = "#3366ff", HQCenterX = -525, HQCenterZ = -525, HQRadius = 50 },
+                    new ConfigData.NeighborhoodConfig { Name = "Eastside Disciples", Type = NeighborhoodType.East, MinX = 0, MaxX = 1050, MinZ = -1050, MaxZ = 0, HexColor = "#444444", HQCenterX = 525, HQCenterZ = -525, HQRadius = 50 }
                 }
             };
         }
@@ -178,7 +223,16 @@ namespace Oxide.Plugins
                 ["WhoAmI_Zone"] = "Current Zone: {0}",
                 ["WhoAmI_Rep"] = "Reputation: {0}",
                 ["WhoAmI_Status"] = "Status: {0}",
-                ["InfiltratorNews"] = "<color=#ff4444>[STREET NEWS]</color> A rival presence was detected in {0}! Check your maps for the search area."
+                ["InfiltratorNews"] = "<color=#ff4444>[STREET NEWS]</color> A rival presence was detected in {0}! Check your maps for the search area.",
+                ["HQ_Trespass"] = "<color=#ffaa00>WARNING:</color> You are trespassing in <color={0}>{1}</color> territory.",
+                ["HQ_NoBuild_Rival"] = "<color=#ff4444>ACCESS DENIED:</color> You cannot build in enemy HQ territory.",
+                ["HQ_NoBuild_TC"] = "<color=#ff4444>ACCESS DENIED:</color> Only the HQ Tool Cupboard is allowed here. Gang members can place personal items in hotel rooms.",
+                ["HQ_NoBuild_Item"] = "<color=#ff4444>ACCESS DENIED:</color> Only small personal items (boxes, bags, beds) are allowed in hotel rooms.",
+                ["HQ_NoAuth_Rival"] = "<color=#ff4444>ACCESS DENIED:</color> You cannot authorize on this HQ's Tool Cupboard.",
+                ["HQ_TC_NoTake"] = "<color=#ff4444>ACCESS DENIED:</color> You can only deposit resources into the HQ Tool Cupboard, not withdraw.",
+                ["HQ_Safezone"] = "<color=#55ff55>SAFEZONE:</color> You are now in {0} HQ. No damage can be dealt here.",
+                ["HQ_TC_Registered"] = "<color=#55ff55>HQ REGISTERED:</color> This Tool Cupboard is now the official {0} headquarters TC.",
+                ["HQ_NotYourHQ"] = "<color=#ff4444>ACCESS DENIED:</color> This is not your gang's HQ. You cannot build here."
             }, this);
         }
 
@@ -250,6 +304,27 @@ namespace Oxide.Plugins
         private void OnCupboardAuthorize(BuildingPrivlidge privilege, BasePlayer player)
         {
             if (player == null || privilege == null) return;
+
+            // Check HQ authorization restrictions first
+            if (_config.HQ.EnableHQSafezones)
+            {
+                var hqHood = GetHQAtPosition(privilege.transform.position);
+                if (hqHood != null)
+                {
+                    var playerInfo = GetPlayerData(player.userID);
+
+                    // Block rivals from authorizing on HQ TCs
+                    if (playerInfo.HomeHood != hqHood.Type && playerInfo.HomeHood != NeighborhoodType.Neutral)
+                    {
+                        SendReply(player, GetMsg("HQ_NoAuth_Rival", player.UserIDString));
+                        // Remove player from authorized list if somehow added
+                        privilege.authorizedPlayers.RemoveAll(x => x.userid == player.userID);
+                        privilege.SendNetworkUpdate();
+                        return;
+                    }
+                }
+            }
+
             CheckTCPlacement(privilege, player);
         }
 
@@ -257,6 +332,15 @@ namespace Oxide.Plugins
         {
             if (entity is BuildingPrivlidge tc)
             {
+                // Check if this is an HQ TC - HQ TCs should never be killed
+                // (This is a backup - damage should be blocked earlier)
+                var hqHood = GetHQAtPosition(tc.transform.position);
+                if (hqHood != null && _hqToolCupboards.TryGetValue(hqHood.Type, out var tcId) && tc.net?.ID == tcId)
+                {
+                    // Remove from HQ registry since it's being destroyed (shouldn't happen normally)
+                    _hqToolCupboards.Remove(hqHood.Type);
+                }
+
                 RemoveMarker(tc.net.ID);
 
                 // Bounty logic
@@ -321,6 +405,147 @@ namespace Oxide.Plugins
             if (marker == null || player == null) return null;
             if (_activeMarkers.Values.Contains(marker)) return true;
             return null;
+        }
+
+        #endregion
+
+        #region HQ Safezone Hooks
+
+        // Block all damage in HQ safezones
+        private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
+        {
+            if (!_config.HQ.EnableHQSafezones || entity == null) return null;
+
+            // Check if entity is in an HQ safezone
+            var hqHood = GetHQAtPosition(entity.transform.position);
+            if (hqHood == null) return null;
+
+            // Check if it's an HQ TC - these are indestructible
+            if (entity is BuildingPrivlidge tc)
+            {
+                if (_hqToolCupboards.TryGetValue(hqHood.Type, out var tcId) && tc.net?.ID == tcId)
+                {
+                    // HQ TC is indestructible
+                    return true;
+                }
+            }
+
+            // Block all damage in HQ safezone
+            return true;
+        }
+
+        // Block building for rivals in HQ zones and restrict TC placement
+        private object CanBuild(Planner planner, Construction prefab, Construction.Target target)
+        {
+            if (!_config.HQ.EnableHQSafezones || planner == null) return null;
+
+            var player = planner.GetOwnerPlayer();
+            if (player == null) return null;
+
+            var hqHood = GetHQAtPosition(target.position);
+            if (hqHood == null) return null;
+
+            var playerInfo = GetPlayerData(player.userID);
+
+            // Check if player belongs to this HQ's gang
+            // Neutral players are also blocked - they must join a gang first
+            if (playerInfo.HomeHood != hqHood.Type)
+            {
+                // Rivals and neutral players cannot build anything in gang HQ
+                SendReply(player, GetMsg("HQ_NoBuild_Rival", player.UserIDString));
+                return false;
+            }
+
+            // Player is from this gang - check what they're trying to build
+            string shortName = prefab.fullName;
+
+            // Check if trying to place a Tool Cupboard
+            bool isCupboard = shortName.EndsWith("cupboard.tool.deployed") || shortName.Contains("/cupboard.tool");
+            
+            if (isCupboard)
+            {
+                // Only allow TC placement if this HQ doesn't have one yet
+                if (_hqToolCupboards.ContainsKey(hqHood.Type))
+                {
+                    SendReply(player, GetMsg("HQ_NoBuild_TC", player.UserIDString));
+                    return false;
+                }
+                // Allow first TC placement
+                return null;
+            }
+
+            // Allow only hotel items for gang members (not TCs at this point)
+            bool isAllowedItem = _config.HQ.AllowedHotelItems.Any(allowed => 
+                shortName.EndsWith(allowed) || shortName.Contains("/" + allowed));
+
+            if (!isAllowedItem)
+            {
+                SendReply(player, GetMsg("HQ_NoBuild_Item", player.UserIDString));
+                return false;
+            }
+
+            return null;
+        }
+
+        // Handle TC placement in HQ - register as HQ TC
+        private void OnEntitySpawned(BaseNetworkable entity)
+        {
+            if (!_config.HQ.EnableHQSafezones) return;
+
+            if (entity is BuildingPrivlidge tc)
+            {
+                var hqHood = GetHQAtPosition(tc.transform.position);
+                if (hqHood == null) return;
+
+                // Register this TC as the HQ TC if not already registered
+                if (!_hqToolCupboards.ContainsKey(hqHood.Type))
+                {
+                    _hqToolCupboards[hqHood.Type] = tc.net.ID;
+                    
+                    // Notify the owner
+                    var owner = BasePlayer.FindByID(tc.OwnerID);
+                    if (owner != null)
+                    {
+                        SendReply(owner, GetMsg("HQ_TC_Registered", owner.UserIDString, hqHood.Name));
+                    }
+                }
+            }
+        }
+
+        // Block taking items from HQ TC (only allow deposits)
+        private object CanMoveItem(Item item, PlayerInventory playerInventory, ItemContainerId targetContainerId, int targetSlot, int amount)
+        {
+            if (!_config.HQ.EnableHQSafezones || item == null || playerInventory == null) return null;
+
+            // Check if item is coming FROM a TC container
+            var sourceContainer = item.parent;
+            if (sourceContainer?.entityOwner is BuildingPrivlidge tc)
+            {
+                var hqHood = GetHQAtPosition(tc.transform.position);
+                if (hqHood == null) return null;
+
+                // Check if this is an HQ TC
+                if (_hqToolCupboards.TryGetValue(hqHood.Type, out var tcId) && tc.net?.ID == tcId)
+                {
+                    // Block taking items from HQ TC
+                    var player = playerInventory.baseEntity;
+                    if (player != null)
+                    {
+                        SendReply(player, GetMsg("HQ_TC_NoTake", player.UserIDString));
+                    }
+                    return false;
+                }
+            }
+
+            return null;
+        }
+
+        // Track player movement for trespass warnings
+        private void OnPlayerTick(BasePlayer player)
+        {
+            if (!_config.HQ.EnableHQSafezones || player == null || player.IsNpc) return;
+
+            CheckTrespassWarning(player);
         }
 
         #endregion
@@ -555,6 +780,91 @@ namespace Oxide.Plugins
         private ConfigData.NeighborhoodConfig GetNeighborhoodConfig(NeighborhoodType type)
         {
             return _config.Neighborhoods.FirstOrDefault(x => x.Type == type);
+        }
+
+        // Get the HQ neighborhood config if position is within an HQ radius
+        private ConfigData.NeighborhoodConfig GetHQAtPosition(Vector3 pos)
+        {
+            foreach (var hood in _config.Neighborhoods)
+            {
+                if (hood.Type == NeighborhoodType.Neutral) continue;
+
+                float distance = Vector3.Distance(
+                    new Vector3(hood.HQCenterX, pos.y, hood.HQCenterZ),
+                    pos
+                );
+
+                if (distance <= hood.HQRadius)
+                {
+                    return hood;
+                }
+            }
+            return null;
+        }
+
+        // Check and send trespass warnings to players in enemy HQ
+        private void CheckTrespassWarning(BasePlayer player)
+        {
+            if (player == null) return;
+
+            var hqHood = GetHQAtPosition(player.transform.position);
+            if (hqHood == null) return;
+
+            var playerInfo = GetPlayerData(player.userID);
+
+            // If player is neutral, they haven't chosen a gang yet
+            if (playerInfo.HomeHood == NeighborhoodType.Neutral) return;
+
+            // If player is in their own HQ, show safezone message (with cooldown)
+            if (playerInfo.HomeHood == hqHood.Type)
+            {
+                if (CanShowTrespassWarning(player.userID, hqHood.Type))
+                {
+                    SendReply(player, GetMsg("HQ_Safezone", player.UserIDString, hqHood.Name));
+                    SetTrespassWarningCooldown(player.userID, hqHood.Type);
+                }
+                return;
+            }
+
+            // Player is in enemy HQ - show trespass warning
+            if (CanShowTrespassWarning(player.userID, hqHood.Type))
+            {
+                SendReply(player, GetMsg("HQ_Trespass", player.UserIDString, hqHood.HexColor, hqHood.Name));
+                SetTrespassWarningCooldown(player.userID, hqHood.Type);
+            }
+        }
+
+        private bool CanShowTrespassWarning(ulong playerId, NeighborhoodType hqType)
+        {
+            if (!_trespassWarningCooldowns.TryGetValue(playerId, out var cooldowns))
+                return true;
+
+            if (!cooldowns.TryGetValue(hqType, out float expiry))
+                return true;
+
+            return Time.realtimeSinceStartup >= expiry;
+        }
+
+        private void SetTrespassWarningCooldown(ulong playerId, NeighborhoodType hqType)
+        {
+            if (!_trespassWarningCooldowns.TryGetValue(playerId, out var cooldowns))
+            {
+                cooldowns = new Dictionary<NeighborhoodType, float>();
+                _trespassWarningCooldowns[playerId] = cooldowns;
+            }
+
+            cooldowns[hqType] = Time.realtimeSinceStartup + _config.HQ.TrespassWarningInterval;
+        }
+
+        // Check if a TC is an HQ TC
+        private bool IsHQToolCupboard(BuildingPrivlidge tc)
+        {
+            if (tc == null) return false;
+
+            var hqHood = GetHQAtPosition(tc.transform.position);
+            if (hqHood == null) return false;
+
+            return _hqToolCupboards.TryGetValue(hqHood.Type, out var tcId) && tc.net?.ID == tcId;
         }
 
         [ChatCommand("gangname")]
