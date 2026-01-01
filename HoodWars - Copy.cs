@@ -24,11 +24,13 @@ namespace Oxide.Plugins
         private Dictionary<NetworkableId, MapMarkerGenericRadius> _activeMarkers = new Dictionary<NetworkableId, MapMarkerGenericRadius>();
         private Dictionary<ulong, Dictionary<NeighborhoodType, float>> _trespassWarningCooldowns = new Dictionary<ulong, Dictionary<NeighborhoodType, float>>();
         private Dictionary<NeighborhoodType, NetworkableId> _hqToolCupboards = new Dictionary<NeighborhoodType, NetworkableId>();
+        private Dictionary<NeighborhoodType, SphereEntity> _hqSphereMarkers = new Dictionary<NeighborhoodType, SphereEntity>();
         
         // Timer for periodic updates
         private Timer _identityTimer;
 
         private const string PrefabMarker = "assets/prefabs/tools/map/genericradiusmarker.prefab";
+        private const string PrefabSphere = "assets/prefabs/visualization/sphere.prefab";
         private const string PermAdmin = "hoodwars.admin";
         private const string PermUse = "hoodwars.use";
 
@@ -100,6 +102,12 @@ namespace Oxide.Plugins
 
                 [JsonProperty("Trespass Warning Interval (Seconds)")]
                 public float TrespassWarningInterval { get; set; } = 30f;
+
+                [JsonProperty("Show HQ Zone Spheres")]
+                public bool ShowHQSpheres { get; set; } = true;
+
+                [JsonProperty("HQ Sphere Opacity (0.0 to 1.0)")]
+                public float HQSphereAlpha { get; set; } = 0.25f;
 
                 [JsonProperty("Allowed Hotel Items (Short Prefab Names)")]
                 public List<string> AllowedHotelItems { get; set; } = new List<string>
@@ -261,12 +269,19 @@ namespace Oxide.Plugins
                 UpdateAllIdentities();
                 RefreshInfiltratorMarkers();
             });
+
+            // Create HQ sphere markers
+            if (_config.HQ.ShowHQSpheres)
+            {
+                CreateAllHQSpheres();
+            }
         }
 
         private void Unload()
         {
             _identityTimer?.Destroy();
             ClearAllMarkers();
+            ClearAllHQSpheres();
             SaveData();
         }
 
@@ -758,6 +773,93 @@ namespace Oxide.Plugins
             foreach (var p in BasePlayer.activePlayerList) UpdateIdentity(p);
         }
 
+        #region HQ Sphere Visual Markers
+
+        private void CreateAllHQSpheres()
+        {
+            foreach (var hood in _config.Neighborhoods)
+            {
+                if (hood.Type == NeighborhoodType.Neutral) continue;
+                CreateHQSphere(hood);
+            }
+        }
+
+        private void CreateHQSphere(ConfigData.NeighborhoodConfig hood)
+        {
+            if (hood == null || hood.Type == NeighborhoodType.Neutral) return;
+            
+            // Remove existing sphere if any
+            RemoveHQSphere(hood.Type);
+
+            // Create sphere at HQ center (positioned slightly above terrain)
+            float terrainHeight = TerrainMeta.HeightMap.GetHeight(new Vector3(hood.HQCenterX, 0, hood.HQCenterZ));
+            Vector3 center = new Vector3(hood.HQCenterX, terrainHeight + 1f, hood.HQCenterZ);
+            
+            var sphere = GameManager.server.CreateEntity(PrefabSphere, center) as SphereEntity;
+            if (sphere == null) return;
+
+            // SphereEntity.currentRadius is actually the diameter, so radius * 2 gives correct visual size
+            sphere.currentRadius = hood.HQRadius * 2f;
+            sphere.lerpSpeed = 0f;
+            
+            sphere.Spawn();
+
+            // Set sphere color based on gang color
+            Color gangColor;
+            if (!ColorUtility.TryParseHtmlString(hood.HexColor, out gangColor))
+            {
+                gangColor = Color.white;
+            }
+
+            // Apply color and transparency to the sphere
+            var renderer = sphere.GetComponentInChildren<MeshRenderer>();
+            if (renderer != null && renderer.sharedMaterial != null)
+            {
+                // Create a new material instance to avoid affecting other spheres
+                var mat = new Material(renderer.sharedMaterial);
+                gangColor.a = _config.HQ.HQSphereAlpha;
+                mat.color = gangColor;
+                renderer.material = mat;
+            }
+
+            _hqSphereMarkers[hood.Type] = sphere;
+        }
+
+        private void RemoveHQSphere(NeighborhoodType type)
+        {
+            if (_hqSphereMarkers.TryGetValue(type, out var sphere))
+            {
+                if (sphere != null && !sphere.IsDestroyed)
+                {
+                    sphere.Kill();
+                }
+                _hqSphereMarkers.Remove(type);
+            }
+        }
+
+        private void ClearAllHQSpheres()
+        {
+            foreach (var sphere in _hqSphereMarkers.Values)
+            {
+                if (sphere != null && !sphere.IsDestroyed)
+                {
+                    sphere.Kill();
+                }
+            }
+            _hqSphereMarkers.Clear();
+        }
+
+        private void RefreshAllHQSpheres()
+        {
+            ClearAllHQSpheres();
+            if (_config.HQ.ShowHQSpheres)
+            {
+                CreateAllHQSpheres();
+            }
+        }
+
+        #endregion
+
         #endregion
 
         #region Helpers & Commands
@@ -998,6 +1100,11 @@ namespace Oxide.Plugins
                         hood.HQCenterX = player.transform.position.x;
                         hood.HQCenterZ = player.transform.position.z;
                         SaveConfig();
+                        // Refresh sphere for this hood
+                        if (_config.HQ.ShowHQSpheres)
+                        {
+                            CreateHQSphere(hood);
+                        }
                         SendReply(player, $"<color=#55ff55>SUCCESS:</color> HQ center for {hood.Name} set to your current position ({hood.HQCenterX:F1}, {hood.HQCenterZ:F1})");
                         ShowAdminUI(player);
                     }
@@ -1009,8 +1116,14 @@ namespace Oxide.Plugins
                     float radius;
                     if (int.TryParse(arg.Args[1], out hIndex) && float.TryParse(arg.Args[2], out radius) && hIndex >= 0 && hIndex < _config.Neighborhoods.Count)
                     {
-                        _config.Neighborhoods[hIndex].HQRadius = Math.Max(10f, radius);
+                        var hood = _config.Neighborhoods[hIndex];
+                        hood.HQRadius = Math.Max(10f, radius);
                         SaveConfig();
+                        // Refresh sphere for this hood
+                        if (_config.HQ.ShowHQSpheres)
+                        {
+                            CreateHQSphere(hood);
+                        }
                         SendReply(player, $"<color=#55ff55>SUCCESS:</color> HQ radius updated to {radius}m");
                         ShowAdminUI(player);
                     }
@@ -1020,6 +1133,14 @@ namespace Oxide.Plugins
                     _config.HQ.EnableHQSafezones = !_config.HQ.EnableHQSafezones;
                     SaveConfig();
                     SendReply(player, $"<color=#55ff55>SUCCESS:</color> HQ Safezones are now {(_config.HQ.EnableHQSafezones ? "ENABLED" : "DISABLED")}");
+                    ShowAdminUI(player);
+                    break;
+
+                case "togglehqspheres":
+                    _config.HQ.ShowHQSpheres = !_config.HQ.ShowHQSpheres;
+                    SaveConfig();
+                    RefreshAllHQSpheres();
+                    SendReply(player, $"<color=#55ff55>SUCCESS:</color> HQ Sphere Markers are now {(_config.HQ.ShowHQSpheres ? "VISIBLE" : "HIDDEN")}");
                     ShowAdminUI(player);
                     break;
 
@@ -1246,6 +1367,12 @@ namespace Oxide.Plugins
                 _config.HQ.EnableHQSafezones ? "0.3 0.6 0.3 1" : "0.6 0.3 0.3 1",
                 "hoodwars.admin togglesafezone");
 
+            // Show HQ Sphere Markers toggle
+            AddSettingRow(elements, ref y, rowHeight, "Show HQ Sphere Markers", 
+                _config.HQ.ShowHQSpheres ? "VISIBLE" : "HIDDEN",
+                _config.HQ.ShowHQSpheres ? "0.3 0.6 0.3 1" : "0.6 0.3 0.3 1",
+                "hoodwars.admin togglehqspheres");
+
             // Trespass Warning Interval
             AddSettingRowWithInput(elements, ref y, rowHeight, "Trespass Warning Interval",
                 $"{_config.HQ.TrespassWarningInterval}s",
@@ -1258,9 +1385,10 @@ namespace Oxide.Plugins
                                "• No damage can be dealt inside HQ radius\n" +
                                "• Only gang members can build (hotel items only)\n" +
                                "• HQ TC is indestructible (deposit only)\n" +
-                               "• Rivals receive trespass warnings",
+                               "• Rivals receive trespass warnings\n" +
+                               "• Sphere markers show the HQ zone visually",
                         FontSize = 12, Align = TextAnchor.MiddleLeft, Color = "0.7 0.7 0.7 1" },
-                RectTransform = { AnchorMin = "0.05 0.1", AnchorMax = "0.95 0.45" }
+                RectTransform = { AnchorMin = "0.05 0.05", AnchorMax = "0.95 0.38" }
             }, "Content");
         }
 
