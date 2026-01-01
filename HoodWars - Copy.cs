@@ -1353,11 +1353,12 @@ namespace Oxide.Plugins
             }, "Content");
 
             // Quick stats
-            int totalPlayers = _storedData.Players.Count;
-            int totalHQs = _hqToolCupboards.Count;
+            int totalPlayers = _storedData?.Players?.Count ?? 0;
+            int totalHQs = _hqToolCupboards?.Count ?? 0;
+            bool safezones = _config?.HQ?.EnableHQSafezones ?? false;
             elements.Add(new CuiLabel
             {
-                Text = { Text = $"Players: {totalPlayers} | Active HQ TCs: {totalHQs}/4 | Safezones: {(_config.HQ.EnableHQSafezones ? "ON" : "OFF")}", 
+                Text = { Text = $"Players: {totalPlayers} | Active HQ TCs: {totalHQs}/4 | Safezones: {(safezones ? "ON" : "OFF")}", 
                         FontSize = 12, Align = TextAnchor.MiddleCenter, Color = "0.7 0.7 0.7 1" },
                 RectTransform = { AnchorMin = "0 0.05", AnchorMax = "1 0.15" }
             }, "Content");
@@ -1367,6 +1368,16 @@ namespace Oxide.Plugins
         {
             float y = 0.85f;
             float rowHeight = 0.12f;
+
+            if (_config == null || _config.HQ == null)
+            {
+                elements.Add(new CuiLabel
+                {
+                    Text = { Text = "Configuration not loaded", FontSize = 14, Align = TextAnchor.MiddleCenter, Color = "1 0.3 0.3 1" },
+                    RectTransform = { AnchorMin = "0 0.4", AnchorMax = "1 0.6" }
+                }, "Content");
+                return;
+            }
 
             // Enable Safezones toggle
             AddSettingRow(elements, ref y, rowHeight, "HQ Safezones", 
@@ -1401,6 +1412,16 @@ namespace Oxide.Plugins
 
         private void AddNeighborhoodsContent(CuiElementContainer elements, int page)
         {
+            if (_config == null || _config.Neighborhoods == null)
+            {
+                elements.Add(new CuiLabel
+                {
+                    Text = { Text = "Configuration not loaded", FontSize = 14, Align = TextAnchor.MiddleCenter, Color = "1 0.3 0.3 1" },
+                    RectTransform = { AnchorMin = "0 0.4", AnchorMax = "1 0.6" }
+                }, "Content");
+                return;
+            }
+
             int itemsPerPage = 2;
             int totalPages = (int)Math.Ceiling(_config.Neighborhoods.Count / (float)itemsPerPage);
             int startIndex = page * itemsPerPage;
@@ -1500,6 +1521,16 @@ namespace Oxide.Plugins
 
         private void AddHotelItemsContent(CuiElementContainer elements, int page)
         {
+            if (_config == null || _config.HQ == null || _config.HQ.AllowedHotelItems == null)
+            {
+                elements.Add(new CuiLabel
+                {
+                    Text = { Text = "Configuration not loaded", FontSize = 14, Align = TextAnchor.MiddleCenter, Color = "1 0.3 0.3 1" },
+                    RectTransform = { AnchorMin = "0 0.4", AnchorMax = "1 0.6" }
+                }, "Content");
+                return;
+            }
+
             int itemsPerPage = 8;
             int totalItems = _config.HQ.AllowedHotelItems.Count;
             int totalPages = (int)Math.Ceiling(totalItems / (float)itemsPerPage);
@@ -1556,6 +1587,16 @@ namespace Oxide.Plugins
 
         private void AddGeneralSettingsContent(CuiElementContainer elements)
         {
+            if (_config == null || _config.General == null)
+            {
+                elements.Add(new CuiLabel
+                {
+                    Text = { Text = "Configuration not loaded", FontSize = 14, Align = TextAnchor.MiddleCenter, Color = "1 0.3 0.3 1" },
+                    RectTransform = { AnchorMin = "0 0.4", AnchorMax = "1 0.6" }
+                }, "Content");
+                return;
+            }
+
             float y = 0.88f;
             float rowHeight = 0.12f;
 
