@@ -333,8 +333,16 @@ namespace Oxide.Plugins
                     if (playerInfo.HomeHood != hqHood.Type && playerInfo.HomeHood != NeighborhoodType.Neutral)
                     {
                         SendReply(player, GetMsg("HQ_NoAuth_Rival", player.UserIDString));
-                        // Remove player from authorized list if somehow added
-                        var toRemove = privilege.authorizedPlayers.FirstOrDefault(x => x.userid == player.userID);
+                        // Remove player from authorized list - iterate to find and remove
+                        ProtoBuf.PlayerNameID toRemove = null;
+                        foreach (var auth in privilege.authorizedPlayers)
+                        {
+                            if (auth.userid == player.userID)
+                            {
+                                toRemove = auth;
+                                break;
+                            }
+                        }
                         if (toRemove != null)
                         {
                             privilege.authorizedPlayers.Remove(toRemove);
