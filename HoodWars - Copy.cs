@@ -161,6 +161,19 @@ namespace Oxide.Plugins
             {
                 _config = Config.ReadObject<ConfigData>();
                 if (_config == null) throw new Exception();
+                
+                // Ensure nested objects exist (for existing configs that may not have new properties)
+                if (_config.General == null) _config.General = new ConfigData.GeneralSettings();
+                if (_config.Markers == null) _config.Markers = new ConfigData.MarkerSettings();
+                if (_config.Chat == null) _config.Chat = new ConfigData.ChatSettings();
+                if (_config.HQ == null) _config.HQ = new ConfigData.HQSettings();
+                if (_config.Neighborhoods == null) _config.Neighborhoods = new List<ConfigData.NeighborhoodConfig>();
+                if (_config.HQ.AllowedHotelItems == null) _config.HQ.AllowedHotelItems = new List<string> 
+                {
+                    "box.wooden.large", "box.wooden", "sleepingbag_leather_deployed", 
+                    "bed_deployed", "small_stash_deployed", "furnace", "campfire",
+                    "workbench1.deployed", "locker.deployed", "fridge.deployed"
+                };
             }
             catch
             {
@@ -1073,6 +1086,13 @@ namespace Oxide.Plugins
 
             if (!arg.HasArgs()) return;
 
+            // Ensure config is loaded before processing any commands
+            if (_config == null)
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> Configuration not loaded. Please reload the plugin.");
+                return;
+            }
+
             string action = arg.Args[0].ToLower();
 
             switch (action)
@@ -1099,6 +1119,7 @@ namespace Oxide.Plugins
                     break;
 
                 case "sethqcenter":
+                    if (_config.HQ == null || _config.Neighborhoods == null) { SendReply(player, "<color=#ff4444>ERROR:</color> Config not fully loaded."); return; }
                     if (arg.Args.Length < 2) return;
                     int hoodIndex;
                     if (int.TryParse(arg.Args[1], out hoodIndex) && hoodIndex >= 0 && hoodIndex < _config.Neighborhoods.Count)
@@ -1118,6 +1139,7 @@ namespace Oxide.Plugins
                     break;
 
                 case "sethqradius":
+                    if (_config.HQ == null || _config.Neighborhoods == null) { SendReply(player, "<color=#ff4444>ERROR:</color> Config not fully loaded."); return; }
                     if (arg.Args.Length < 3) return;
                     int hIndex;
                     float radius;
@@ -1137,6 +1159,7 @@ namespace Oxide.Plugins
                     break;
 
                 case "togglesafezone":
+                    if (_config.HQ == null) { SendReply(player, "<color=#ff4444>ERROR:</color> Config not fully loaded."); return; }
                     _config.HQ.EnableHQSafezones = !_config.HQ.EnableHQSafezones;
                     SaveConfig();
                     SendReply(player, $"<color=#55ff55>SUCCESS:</color> HQ Safezones are now {(_config.HQ.EnableHQSafezones ? "ENABLED" : "DISABLED")}");
@@ -1144,6 +1167,7 @@ namespace Oxide.Plugins
                     break;
 
                 case "togglehqspheres":
+                    if (_config.HQ == null) { SendReply(player, "<color=#ff4444>ERROR:</color> Config not fully loaded."); return; }
                     _config.HQ.ShowHQSpheres = !_config.HQ.ShowHQSpheres;
                     SaveConfig();
                     RefreshAllHQSpheres();
@@ -1152,6 +1176,7 @@ namespace Oxide.Plugins
                     break;
 
                 case "setwarninginterval":
+                    if (_config.HQ == null) { SendReply(player, "<color=#ff4444>ERROR:</color> Config not fully loaded."); return; }
                     if (arg.Args.Length < 2) return;
                     float interval;
                     if (float.TryParse(arg.Args[1], out interval))
@@ -1164,6 +1189,7 @@ namespace Oxide.Plugins
                     break;
 
                 case "addhotelitem":
+                    if (_config.HQ == null || _config.HQ.AllowedHotelItems == null) { SendReply(player, "<color=#ff4444>ERROR:</color> Config not fully loaded."); return; }
                     if (arg.Args.Length < 2) return;
                     string itemToAdd = arg.Args[1];
                     if (!_config.HQ.AllowedHotelItems.Contains(itemToAdd))
@@ -1176,6 +1202,7 @@ namespace Oxide.Plugins
                     break;
 
                 case "removehotelitem":
+                    if (_config.HQ == null || _config.HQ.AllowedHotelItems == null) { SendReply(player, "<color=#ff4444>ERROR:</color> Config not fully loaded."); return; }
                     if (arg.Args.Length < 2) return;
                     int itemIndex;
                     if (int.TryParse(arg.Args[1], out itemIndex) && itemIndex >= 0 && itemIndex < _config.HQ.AllowedHotelItems.Count)
@@ -1189,6 +1216,7 @@ namespace Oxide.Plugins
                     break;
 
                 case "setrevealduration":
+                    if (_config.General == null) { SendReply(player, "<color=#ff4444>ERROR:</color> Config not fully loaded."); return; }
                     if (arg.Args.Length < 2) return;
                     float duration;
                     if (float.TryParse(arg.Args[1], out duration))
@@ -1201,6 +1229,7 @@ namespace Oxide.Plugins
                     break;
 
                 case "setproximitydist":
+                    if (_config.General == null) { SendReply(player, "<color=#ff4444>ERROR:</color> Config not fully loaded."); return; }
                     if (arg.Args.Length < 2) return;
                     float dist;
                     if (float.TryParse(arg.Args[1], out dist))
@@ -1213,6 +1242,7 @@ namespace Oxide.Plugins
                     break;
 
                 case "togglekillreveal":
+                    if (_config.General == null) { SendReply(player, "<color=#ff4444>ERROR:</color> Config not fully loaded."); return; }
                     _config.General.KillReveal = !_config.General.KillReveal;
                     SaveConfig();
                     SendReply(player, $"<color=#55ff55>SUCCESS:</color> Kill reveal is now {(_config.General.KillReveal ? "ENABLED" : "DISABLED")}");
@@ -1220,6 +1250,7 @@ namespace Oxide.Plugins
                     break;
 
                 case "setbounty":
+                    if (_config.General == null) { SendReply(player, "<color=#ff4444>ERROR:</color> Config not fully loaded."); return; }
                     if (arg.Args.Length < 2) return;
                     int bounty;
                     if (int.TryParse(arg.Args[1], out bounty))
@@ -1232,6 +1263,7 @@ namespace Oxide.Plugins
                     break;
 
                 case "clearhqtc":
+                    if (_config.Neighborhoods == null) { SendReply(player, "<color=#ff4444>ERROR:</color> Config not fully loaded."); return; }
                     if (arg.Args.Length < 2) return;
                     int clearIndex;
                     if (int.TryParse(arg.Args[1], out clearIndex) && clearIndex >= 0 && clearIndex < _config.Neighborhoods.Count)
