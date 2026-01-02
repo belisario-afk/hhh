@@ -1332,7 +1332,11 @@ namespace Oxide.Plugins
                     break;
 
                 case "spawndoor":
-                    SpawnHotelDoor(player);
+                    SpawnHotelDoor(player, false);
+                    break;
+
+                case "spawndoubledoor":
+                    SpawnHotelDoor(player, true);
                     break;
 
                 case "doorinfo":
@@ -1992,24 +1996,32 @@ namespace Oxide.Plugins
             elements.Add(new CuiButton
             {
                 Button = { Color = manualDoorLoaded ? "0.3 0.6 0.3 1" : "0.4 0.4 0.4 1", Command = "hoodwars.admin spawndoor" },
-                RectTransform = { AnchorMin = $"0.02 {y - rowHeight}", AnchorMax = $"0.32 {y}" },
-                Text = { Text = manualDoorLoaded ? "Spawn Hotel Door" : "ManualDoor N/A", FontSize = 10, Align = TextAnchor.MiddleCenter }
+                RectTransform = { AnchorMin = $"0.02 {y - rowHeight}", AnchorMax = $"0.24 {y}" },
+                Text = { Text = manualDoorLoaded ? "Spawn Door" : "ManualDoor N/A", FontSize = 9, Align = TextAnchor.MiddleCenter }
+            }, "Content");
+
+            // Spawn Double Door button (requires ManualDoor)
+            elements.Add(new CuiButton
+            {
+                Button = { Color = manualDoorLoaded ? "0.3 0.5 0.6 1" : "0.4 0.4 0.4 1", Command = "hoodwars.admin spawndoubledoor" },
+                RectTransform = { AnchorMin = $"0.26 {y - rowHeight}", AnchorMax = $"0.48 {y}" },
+                Text = { Text = manualDoorLoaded ? "Spawn Double" : "ManualDoor N/A", FontSize = 9, Align = TextAnchor.MiddleCenter }
             }, "Content");
 
             // Spawn HQ TC button
             elements.Add(new CuiButton
             {
                 Button = { Color = "0.2 0.5 0.7 1", Command = "hoodwars.admin spawntc" },
-                RectTransform = { AnchorMin = $"0.34 {y - rowHeight}", AnchorMax = $"0.64 {y}" },
-                Text = { Text = "Spawn HQ TC", FontSize = 10, Align = TextAnchor.MiddleCenter }
+                RectTransform = { AnchorMin = $"0.50 {y - rowHeight}", AnchorMax = $"0.72 {y}" },
+                Text = { Text = "Spawn HQ TC", FontSize = 9, Align = TextAnchor.MiddleCenter }
             }, "Content");
 
             // Door Info button
             elements.Add(new CuiButton
             {
                 Button = { Color = manualDoorLoaded ? "0.4 0.5 0.4 1" : "0.4 0.4 0.4 1", Command = "hoodwars.admin doorinfo" },
-                RectTransform = { AnchorMin = $"0.66 {y - rowHeight}", AnchorMax = $"0.98 {y}" },
-                Text = { Text = "Get Door Info", FontSize = 10, Align = TextAnchor.MiddleCenter }
+                RectTransform = { AnchorMin = $"0.74 {y - rowHeight}", AnchorMax = $"0.98 {y}" },
+                Text = { Text = "Door Info", FontSize = 9, Align = TextAnchor.MiddleCenter }
             }, "Content");
 
             y -= rowHeight + spacing;
@@ -2242,7 +2254,8 @@ namespace Oxide.Plugins
                                      "/hoodadmin setwarning <seconds> - Set warning interval\n" +
                                      "/hoodadmin sethqtc <gang_idx> - Set looked TC as gang HQ TC\n" +
                                      "/hoodadmin spawntc - Spawn HQ TC at position\n" +
-                                     "/hoodadmin spawndoor - Spawn hotel door at position\n" +
+                                     "/hoodadmin spawndoor - Spawn single hotel door\n" +
+                                     "/hoodadmin spawndoubledoor - Spawn double hotel door\n" +
                                      "/hoodadmin testevict - Test evict from nearest door\n" +
                                      "/hoodadmin forceexpire - Force expire door claim (test timer)\n" +
                                      "/hoodadmin doorinfo - Get info on nearest hotel door\n" +
@@ -2267,7 +2280,11 @@ namespace Oxide.Plugins
                     break;
 
                 case "spawndoor":
-                    SpawnHotelDoor(player);
+                    SpawnHotelDoor(player, false);
+                    break;
+
+                case "spawndoubledoor":
+                    SpawnHotelDoor(player, true);
                     break;
 
                 case "spawntc":
@@ -2303,7 +2320,7 @@ namespace Oxide.Plugins
         }
 
         // Spawn a hotel door at player's position (uses ManualDoor plugin)
-        private void SpawnHotelDoor(BasePlayer player)
+        private void SpawnHotelDoor(BasePlayer player, bool isDoubleDoor = false)
         {
             if (!IsManualDoorLoaded())
             {
@@ -2318,9 +2335,17 @@ namespace Oxide.Plugins
                 SendReply(player, "<color=#ffaa00>WARNING:</color> You are not in an HQ zone. Hotel doors should be placed in HQ areas.");
             }
 
-            // Execute ManualDoor's spawndoor command
-            player.SendConsoleCommand("chat.say", "/spawndoor");
-            SendReply(player, "<color=#55ff55>SUCCESS:</color> Use the ManualDoor /spawndoor command to place a hotel door.");
+            // Execute ManualDoor's spawndoor or spawndoubledoor command
+            if (isDoubleDoor)
+            {
+                player.SendConsoleCommand("chat.say", "/spawndoubledoor");
+                SendReply(player, "<color=#55ff55>SUCCESS:</color> Use the ManualDoor /spawndoubledoor command to place a double hotel door.");
+            }
+            else
+            {
+                player.SendConsoleCommand("chat.say", "/spawndoor");
+                SendReply(player, "<color=#55ff55>SUCCESS:</color> Use the ManualDoor /spawndoor command to place a single hotel door.");
+            }
         }
 
         // Spawn an HQ Tool Cupboard at player's position

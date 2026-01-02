@@ -9,11 +9,12 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("ManualDoor", "Gemini", "3.4.0")]
+    [Info("ManualDoor", "Gemini", "3.5.0")]
     [Description("Spawns permanent, non-decaying doors with claim timers, eviction, and admin move/rotate GUI. Integrates with HoodWars for gang-based hotel rooms.")]
     public class ManualDoor : RustPlugin
     {
         private const string DoorPrefab = "assets/prefabs/building/door.hinged/door.hinged.metal.prefab";
+        private const string DoubleDoorPrefab = "assets/prefabs/building/door.double.hinged/door.double.hinged.metal.prefab";
         private const string CodeLockPrefab = "assets/prefabs/locks/keypad/lock.code.prefab";
 
         private const string AdminPermission = "manualdoor.admin";
@@ -71,6 +72,7 @@ namespace Oxide.Plugins
 
             public List<ulong> EvictedPlayers = new List<ulong>();
             public string LockCode;
+            public bool IsDoubleDoor; // true for double door, false for single door
 
             public Vector3 GetPosition() => new Vector3(PosX, PosY, PosZ);
             public Quaternion GetRotation() => new Quaternion(RotX, RotY, RotZ, RotW);
@@ -105,7 +107,8 @@ namespace Oxide.Plugins
                     ClaimedBy = ClaimedBy,
                     ClaimExpiry = ClaimExpiry,
                     EvictedPlayers = new List<ulong>(EvictedPlayers),
-                    LockCode = LockCode
+                    LockCode = LockCode,
+                    IsDoubleDoor = IsDoubleDoor
                 };
             }
         }
@@ -404,10 +407,32 @@ namespace Oxide.Plugins
             }
 
             var rot = Quaternion.Euler(0f, player.viewAngles.y + 180f, 0f);
-            var door = SpawnPermanentDoor(hit.point, rot, player.userID);
+            var door = SpawnPermanentDoor(hit.point, rot, player.userID, false);
 
             if (door != null)
-                SendReply(player, "<color=#66ff66>Door spawned. Use /dooredit while looking at it to adjust.</color>");
+                SendReply(player, "<color=#66ff66>Single door spawned. Use /dooredit while looking at it to adjust.</color>");
+        }
+
+        [ChatCommand("spawndoubledoor")]
+        private void CmdSpawnDoubleDoor(BasePlayer player, string cmd, string[] args)
+        {
+            if (!permission.UserHasPermission(player.UserIDString, AdminPermission))
+            {
+                SendReply(player, "<color=#ff6666>Permission denied.</color>");
+                return;
+            }
+
+            if (!Physics.Raycast(player.eyes.HeadRay(), out var hit, 10f))
+            {
+                SendReply(player, "<color=#ffcc00>Look at the ground to place the door.</color>");
+                return;
+            }
+
+            var rot = Quaternion.Euler(0f, player.viewAngles.y + 180f, 0f);
+            var door = SpawnPermanentDoor(hit.point, rot, player.userID, true);
+
+            if (door != null)
+                SendReply(player, "<color=#66ff66>Double door spawned. Use /dooredit while looking at it to adjust.</color>");
         }
 
         [ChatCommand("removedoor")]
@@ -896,9 +921,10 @@ namespace Oxide.Plugins
 
         #region Door spawn
 
-        private BaseEntity SpawnPermanentDoor(Vector3 pos, Quaternion rot, ulong ownerId)
+        private BaseEntity SpawnPermanentDoor(Vector3 pos, Quaternion rot, ulong ownerId, bool isDoubleDoor)
         {
-            var ent = GameManager.server.CreateEntity(DoorPrefab, pos, rot);
+            var prefab = isDoubleDoor ? DoubleDoorPrefab : DoorPrefab;
+            var ent = GameManager.server.CreateEntity(prefab, pos, rot);
             if (ent == null)
                 return null;
 
@@ -919,7 +945,8 @@ namespace Oxide.Plugins
             {
                 OwnerId = ownerId,
                 ClaimedBy = 0,
-                ClaimExpiry = 0
+                ClaimExpiry = 0,
+                IsDoubleDoor = isDoubleDoor
             };
             info.SetPosition(pos);
             info.SetRotation(rot);
@@ -933,7 +960,8 @@ namespace Oxide.Plugins
 
         private BaseEntity SpawnDoorFromInfo(DoorInfo info)
         {
-            var ent = GameManager.server.CreateEntity(DoorPrefab, info.GetPosition(), info.GetRotation());
+            var prefab = info.IsDoubleDoor ? DoubleDoorPrefab : DoorPrefab;
+            var ent = GameManager.server.CreateEntity(prefab, info.GetPosition(), info.GetRotation());
             if (ent == null)
                 return null;
 
@@ -970,7 +998,8 @@ namespace Oxide.Plugins
 
         private BaseEntity SpawnDoorWithState(Vector3 pos, Quaternion rot, DoorInfo info, CodeLockState state)
         {
-            var ent = GameManager.server.CreateEntity(DoorPrefab, pos, rot);
+            var prefab = info.IsDoubleDoor ? DoubleDoorPrefab : DoorPrefab;
+            var ent = GameManager.server.CreateEntity(prefab, pos, rot);
             if (ent == null)
                 return null;
 
