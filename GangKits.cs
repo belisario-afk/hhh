@@ -5,10 +5,12 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("GangKits", "Gemini", "1.4.0")]
+    [Info("GangKits", "Gemini", "1.5.0")]
     [Description("Automatic permanent gang outfits and weapons. Includes admin testing tools.")]
     public class GangKits : RustPlugin
     {
+        // Track gang kit weapons dropped on ground (to clean up)
+        private HashSet<uint> _droppedKitItems = new HashSet<uint>();
         [PluginReference]
         private Plugin HoodWars;
 
@@ -220,12 +222,23 @@ namespace Oxide.Plugins
 
         private bool IsSlotOccupied(BasePlayer player, string shortname)
         {
-            return player.inventory.containerWear.itemList.Any(item => item.info.shortname == shortname);
+            // Check if slot is occupied by a NON-gang-kit item
+            // Gang kit items don't count as "occupied" since they can be replaced
+            return player.inventory.containerWear.itemList.Any(item => 
+                item.info.shortname == shortname && item.name != "GANG_KIT_ITEM");
         }
 
         private bool HasWeapon(BasePlayer player, string shortname)
         {
+            // Check if player has this weapon (either kit or non-kit version)
             return player.inventory.containerBelt.itemList.Any(i => i.info.shortname == shortname);
+        }
+        
+        private bool HasGangKitWeapon(BasePlayer player, string shortname)
+        {
+            // Check if player specifically has a gang kit version of this weapon
+            return player.inventory.containerBelt.itemList.Any(i => 
+                i.info.shortname == shortname && i.name == "GANG_KIT_WEAPON");
         }
 
         private string GetPlayerGang(BasePlayer player)
@@ -265,32 +278,94 @@ namespace Oxide.Plugins
 
         private void OnPlayerRespawned(BasePlayer player)
         {
-            timer.Once(1.5f, () => GiveGangKit(player));
+            if (player == null) return;
+            Puts($"[DEBUG] OnPlayerRespawned: {player.displayName}");
+            
+            // Clear any existing gang kit items (fresh start)
+            timer.Once(0.5f, () => {
+                if (player == null || !player.IsConnected) return;
+                
+                // Force give kit on respawn (true permanent kit behavior)
+                string gangName = GetPlayerGang(player);
+                Puts($"[DEBUG] OnPlayerRespawned giving kit for gang: {gangName}");
+                GiveGangKit(player, gangName); // Force give by passing gang name
+            });
         }
 
         private void OnItemRemovedFromContainer(ItemContainer container, Item item)
         {
             BasePlayer player = container.playerOwner;
-            if (player == null) return;
+            if (player == null || item == null) return;
 
-            if (container == player.inventory.containerWear || container == player.inventory.containerBelt)
+            // Only care about wear and belt containers
+            if (container != player.inventory.containerWear && container != player.inventory.containerBelt)
+                return;
+                
+            // If it's a gang kit item being removed, don't re-trigger kit give immediately
+            // (prevents infinite loops when replacing items)
+            if (item.name == "GANG_KIT_ITEM" || item.name == "GANG_KIT_WEAPON")
+                return;
+                
+            Puts($"[DEBUG] OnItemRemovedFromContainer: {item.info.shortname} removed from {(container == player.inventory.containerWear ? "wear" : "belt")}");
+            
+            // Non-kit item removed - check if we need to restore gang kit in that slot
+            timer.Once(0.5f, () => {
+                if (player == null || !player.IsConnected) return;
+                GiveGangKit(player); // Only give missing items
+            });
+        }
+
+        // Track when items are dropped on the ground
+        private void OnItemDropped(Item item, BaseEntity entity)
+        {
+            if (item == null) return;
+            
+            // If this is a gang kit item dropped on ground, track it for cleanup
+            if (item.name == "GANG_KIT_ITEM" || item.name == "GANG_KIT_WEAPON")
             {
-                timer.Once(0.5f, () => GiveGangKit(player));
+                Puts($"[DEBUG] Gang kit item dropped on ground: {item.info.shortname}");
+                
+                // Destroy it immediately - gang kit items can't be dropped
+                timer.Once(0.1f, () => {
+                    if (entity != null && !entity.IsDestroyed)
+                    {
+                        Puts($"[DEBUG] Destroying dropped gang kit item: {item.info.shortname}");
+                        entity.Kill();
+                    }
+                });
             }
         }
 
         private void OnPlayerCorpseSpawned(BasePlayer player, PlayerCorpse corpse)
         {
             if (corpse == null) return;
+            Puts($"[DEBUG] OnPlayerCorpseSpawned: {player?.displayName ?? "unknown"}");
+            
+            int removed = 0;
             foreach (var container in corpse.containers)
             {
                 for (int i = container.itemList.Count - 1; i >= 0; i--)
                 {
                     var item = container.itemList[i];
                     if (item.name == "GANG_KIT_ITEM" || item.name == "GANG_KIT_WEAPON")
+                    {
+                        Puts($"[DEBUG] Removing gang kit item from corpse: {item.info.shortname}");
                         item.Remove();
+                        removed++;
+                    }
                 }
             }
+            Puts($"[DEBUG] Removed {removed} gang kit items from corpse");
+        }
+        
+        // When player dies, ensure we clean up any dropped gang kit items
+        private void OnPlayerDeath(BasePlayer player, HitInfo info)
+        {
+            if (player == null) return;
+            Puts($"[DEBUG] OnPlayerDeath: {player.displayName}");
+            
+            // Note: Corpse handling is done in OnPlayerCorpseSpawned
+            // Respawn kit is handled in OnPlayerRespawned
         }
 
         #endregion
