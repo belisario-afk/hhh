@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("HoodWars", "Gemini", "7.9.0")]
+    [Info("HoodWars", "Gemini", "7.9.1")]
     [Description("A robust, comprehensive gang-based territory and identity system for a unique vanilla-feel Rust experience.")]
     public class HoodWars : RustPlugin
     {
@@ -35,6 +35,7 @@ namespace Oxide.Plugins
 
         private const string PrefabMarker = "assets/prefabs/tools/map/genericradiusmarker.prefab";
         private const string PrefabSphere = "assets/prefabs/visualization/sphere.prefab";
+        private const string PrefabToolCupboard = "assets/prefabs/deployable/tool cupboard/cupboard.tool.deployed.prefab";
         private const string PermAdmin = "hoodwars.admin";
         private const string PermUse = "hoodwars.use";
 
@@ -1966,16 +1967,24 @@ namespace Oxide.Plugins
             elements.Add(new CuiButton
             {
                 Button = { Color = manualDoorLoaded ? "0.3 0.6 0.3 1" : "0.4 0.4 0.4 1", Command = "hoodwars.admin spawndoor" },
-                RectTransform = { AnchorMin = $"0.02 {y - rowHeight}", AnchorMax = $"0.48 {y}" },
-                Text = { Text = manualDoorLoaded ? "Spawn Hotel Door" : "ManualDoor Not Loaded", FontSize = 11, Align = TextAnchor.MiddleCenter }
+                RectTransform = { AnchorMin = $"0.02 {y - rowHeight}", AnchorMax = $"0.32 {y}" },
+                Text = { Text = manualDoorLoaded ? "Spawn Hotel Door" : "ManualDoor N/A", FontSize = 10, Align = TextAnchor.MiddleCenter }
+            }, "Content");
+
+            // Spawn HQ TC button
+            elements.Add(new CuiButton
+            {
+                Button = { Color = "0.2 0.5 0.7 1", Command = "hoodwars.admin spawntc" },
+                RectTransform = { AnchorMin = $"0.34 {y - rowHeight}", AnchorMax = $"0.64 {y}" },
+                Text = { Text = "Spawn HQ TC", FontSize = 10, Align = TextAnchor.MiddleCenter }
             }, "Content");
 
             // Door Info button
             elements.Add(new CuiButton
             {
                 Button = { Color = manualDoorLoaded ? "0.4 0.5 0.4 1" : "0.4 0.4 0.4 1", Command = "hoodwars.admin doorinfo" },
-                RectTransform = { AnchorMin = $"0.52 {y - rowHeight}", AnchorMax = $"0.98 {y}" },
-                Text = { Text = "Get Door Info", FontSize = 11, Align = TextAnchor.MiddleCenter }
+                RectTransform = { AnchorMin = $"0.66 {y - rowHeight}", AnchorMax = $"0.98 {y}" },
+                Text = { Text = "Get Door Info", FontSize = 10, Align = TextAnchor.MiddleCenter }
             }, "Content");
 
             y -= rowHeight + spacing;
@@ -2034,7 +2043,7 @@ namespace Oxide.Plugins
             // Help text
             elements.Add(new CuiLabel
             {
-                Text = { Text = "Chat commands: /testsafezone, /testtrespass, /listhoteldoors, /resetgangtc <gang>", 
+                Text = { Text = "Commands: /testsafezone, /testtrespass, /listhoteldoors, /hoodadmin spawntc", 
                         FontSize = 9, Align = TextAnchor.MiddleCenter, Color = "0.5 0.5 0.5 1" },
                 RectTransform = { AnchorMin = "0.02 0.02", AnchorMax = "0.98 0.1" }
             }, "Content");
@@ -2207,6 +2216,7 @@ namespace Oxide.Plugins
                                      "/hoodadmin setradius <idx> <meters> - Set HQ radius\n" +
                                      "/hoodadmin setwarning <seconds> - Set warning interval\n" +
                                      "/hoodadmin sethqtc <gang_idx> - Set looked TC as gang HQ TC\n" +
+                                     "/hoodadmin spawntc - Spawn HQ TC at position\n" +
                                      "/hoodadmin spawndoor - Spawn hotel door at position\n" +
                                      "/hoodadmin testevict - Test evict from nearest door\n" +
                                      "/hoodadmin forceexpire - Force expire door claim (test timer)\n" +
@@ -2233,6 +2243,10 @@ namespace Oxide.Plugins
 
                 case "spawndoor":
                     SpawnHotelDoor(player);
+                    break;
+
+                case "spawntc":
+                    SpawnHQToolCupboard(player);
                     break;
 
                 case "testevict":
@@ -2282,6 +2296,75 @@ namespace Oxide.Plugins
             // Execute ManualDoor's spawndoor command
             player.SendConsoleCommand("chat.say", "/spawndoor");
             SendReply(player, "<color=#55ff55>SUCCESS:</color> Use the ManualDoor /spawndoor command to place a hotel door.");
+        }
+
+        // Spawn an HQ Tool Cupboard at player's position
+        private void SpawnHQToolCupboard(BasePlayer player)
+        {
+            // Check if player is in an HQ zone
+            var hqHood = GetHQAtPosition(player.transform.position);
+            if (hqHood == null)
+            {
+                SendReply(player, "<color=#ffaa00>WARNING:</color> You are not in an HQ zone. Spawning TC anyway, but consider placing it in an HQ area.");
+            }
+
+            // Get spawn position (where player is looking at ground, or player position)
+            RaycastHit hit;
+            Vector3 spawnPos;
+            Quaternion spawnRot;
+
+            if (Physics.Raycast(player.eyes.HeadRay(), out hit, 10f, LayerMask.GetMask("Terrain", "World", "Construction")))
+            {
+                spawnPos = hit.point;
+                // Rotate to face the player
+                spawnRot = Quaternion.LookRotation((player.transform.position - hit.point).normalized);
+                spawnRot = Quaternion.Euler(0, spawnRot.eulerAngles.y, 0); // Only Y rotation
+            }
+            else
+            {
+                // Spawn at player's feet
+                spawnPos = player.transform.position + (player.transform.forward * 1.5f);
+                spawnRot = Quaternion.Euler(0, player.transform.eulerAngles.y + 180, 0);
+            }
+
+            // Create the Tool Cupboard
+            var tc = GameManager.server.CreateEntity(PrefabToolCupboard, spawnPos, spawnRot) as BuildingPrivlidge;
+            if (tc == null)
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> Failed to create Tool Cupboard entity.");
+                return;
+            }
+
+            // Set ownership to 0 (server/admin) so any gang member can authorize
+            tc.OwnerID = 0;
+            tc.Spawn();
+
+            // Auto-authorize the admin who spawned it
+            if (tc.authorizedPlayers != null)
+            {
+                tc.authorizedPlayers.Add(player.userID);
+            }
+
+            // Optionally register as HQ TC if in an HQ zone
+            if (hqHood != null)
+            {
+                var netId = tc.net?.ID ?? default(NetworkableId);
+                if (netId.Value != 0)
+                {
+                    _hqToolCupboards[hqHood.Type] = netId;
+                    SendReply(player, $"<color=#55ff55>SUCCESS:</color> Spawned HQ Tool Cupboard and registered for <color={hqHood.HexColor}>{hqHood.Name}</color>.\n" +
+                                     $"Position: {spawnPos}\nEntity ID: {netId.Value}");
+                }
+                else
+                {
+                    SendReply(player, "<color=#55ff55>SUCCESS:</color> Spawned Tool Cupboard, but could not auto-register (no net ID).");
+                }
+            }
+            else
+            {
+                SendReply(player, $"<color=#55ff55>SUCCESS:</color> Spawned Tool Cupboard at {spawnPos}.\n" +
+                                 "Note: Not in HQ zone - use '/hoodadmin sethqtc <idx>' to register it for a gang.");
+            }
         }
 
         // Test eviction from the nearest hotel door
