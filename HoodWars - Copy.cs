@@ -2313,7 +2313,8 @@ namespace Oxide.Plugins
             Vector3 spawnPos;
             Quaternion spawnRot;
 
-            if (Physics.Raycast(player.eyes.HeadRay(), out hit, 10f, LayerMask.GetMask("Terrain", "World", "Construction")))
+            // First try a general raycast (similar to ManualDoor) - no layer restriction
+            if (Physics.Raycast(player.eyes.HeadRay(), out hit, 10f))
             {
                 spawnPos = hit.point;
                 // Rotate to face the player
@@ -2337,7 +2338,23 @@ namespace Oxide.Plugins
 
             // Set ownership to 0 (server/admin) so any gang member can authorize
             tc.OwnerID = 0;
+            
+            // CRITICAL: Disable GroundWatch to allow spawning on bare ground (no foundation required)
+            var gw = tc.GetComponent<GroundWatch>();
+            if (gw != null) gw.enabled = false;
+            
+            // CRITICAL: Set grounded to true so it doesn't destroy itself without foundations
+            var stab = tc.GetComponent<StabilityEntity>();
+            if (stab != null) stab.grounded = true;
+            
+            // Disable decay so it doesn't decay without a TC (ironic for a TC)
+            var decay = tc.GetComponent<DecayEntity>();
+            if (decay != null) decay.decay = null;
+            
             tc.Spawn();
+            
+            // Ground the entity to the terrain
+            tc.SendNetworkUpdate();
 
             // Auto-authorize the admin who spawned it
             if (tc.authorizedPlayers != null)
