@@ -1281,6 +1281,21 @@ namespace Oxide.Plugins
                     }
                     break;
 
+                case "sethqtc":
+                    if (_config.Neighborhoods == null) { SendReply(player, "<color=#ff4444>ERROR:</color> Config not fully loaded."); return; }
+                    if (arg.Args.Length < 2) return;
+                    int setIndex;
+                    if (int.TryParse(arg.Args[1], out setIndex) && setIndex >= 0 && setIndex < _config.Neighborhoods.Count)
+                    {
+                        SetHQTCFromLook(player, setIndex);
+                        ShowAdminUI(player);
+                    }
+                    break;
+
+                case "forceexpire":
+                    ForceExpireNearestDoor(player);
+                    break;
+
                 // Testing commands
                 case "testsafezone":
                     TestSafezoneFromUI(player);
@@ -1417,6 +1432,81 @@ namespace Oxide.Plugins
             else
             {
                 SendReply(player, "<color=#ffaa00>INFO:</color> No HQ TC was registered for that gang.");
+            }
+        }
+
+        // Admin command to set the TC they're looking at as the HQ TC for a gang
+        private void SetHQTCFromLook(BasePlayer player, int gangIndex)
+        {
+            if (_config == null || _config.Neighborhoods == null || gangIndex < 0 || gangIndex >= _config.Neighborhoods.Count)
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> Invalid gang index.");
+                return;
+            }
+
+            // Raycast to find TC the admin is looking at
+            RaycastHit hit;
+            if (!Physics.Raycast(player.eyes.HeadRay(), out hit, 10f))
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> Look at a Tool Cupboard within 10m and try again.");
+                return;
+            }
+
+            var tc = hit.GetEntity() as BuildingPrivlidge;
+            if (tc == null)
+            {
+                // Try to find nearest TC
+                tc = BaseNetworkable.serverEntities.OfType<BuildingPrivlidge>()
+                    .Where(t => t != null && Vector3.Distance(t.transform.position, player.transform.position) < 5f)
+                    .OrderBy(t => Vector3.Distance(t.transform.position, player.transform.position))
+                    .FirstOrDefault();
+            }
+
+            if (tc == null)
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> No Tool Cupboard found nearby. Stand next to a TC and try again.");
+                return;
+            }
+
+            var hood = _config.Neighborhoods[gangIndex];
+            
+            // Clear existing TC registration for this gang
+            _hqToolCupboards.Remove(hood.Type);
+            
+            // Set this TC as the HQ TC
+            _hqToolCupboards[hood.Type] = tc.net.ID;
+            
+            SendReply(player, $"<color=#55ff55>SUCCESS:</color> Set TC (ID: {tc.net.ID.Value}) as the HQ TC for <color={hood.HexColor}>{hood.Name}</color>.\n" +
+                             "This TC is now indestructible and deposit-only.");
+        }
+
+        // Force expire the claim on the nearest door (for testing eviction timer)
+        private void ForceExpireNearestDoor(BasePlayer player)
+        {
+            if (!IsManualDoorLoaded())
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> ManualDoor plugin is not loaded.");
+                return;
+            }
+
+            var nearestDoor = FindNearestHotelDoor(player.transform.position, 5f);
+            if (nearestDoor == null)
+            {
+                SendReply(player, "<color=#ffaa00>INFO:</color> No hotel door found within 5m. Stand next to a door and try again.");
+                return;
+            }
+
+            // Call ManualDoor API to force expire the claim
+            var result = ManualDoor?.Call("API_ForceExpireClaim", nearestDoor.net.ID.Value);
+            if (result != null && (bool)result)
+            {
+                SendReply(player, "<color=#55ff55>EVICTION TIMER TEST:</color> Door claim has been force-expired. The claimant should receive the eviction notification.");
+            }
+            else
+            {
+                // If API doesn't exist, try the resetdoor approach
+                player.SendConsoleCommand("chat.say", "/resetdoor");
+                SendReply(player, "<color=#ffaa00>INFO:</color> API_ForceExpireClaim not found in ManualDoor. Used /resetdoor instead.");
             }
         }
 
@@ -1599,6 +1689,14 @@ namespace Oxide.Plugins
                 return;
             }
 
+            // Add help text at top
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = "HQ TC Setup: 1) Stand in the HQ zone 2) Place a TC or stand near an existing one 3) Click 'Set Looked TC' OR place a new TC (auto-registers)", 
+                        FontSize = 9, Align = TextAnchor.MiddleCenter, Color = "0.6 0.8 0.6 1" },
+                RectTransform = { AnchorMin = "0.02 0.92", AnchorMax = "0.98 0.98" }
+            }, "Content");
+
             int itemsPerPage = 2;
             int totalPages = (int)Math.Ceiling(_config.Neighborhoods.Count / (float)itemsPerPage);
             int startIndex = page * itemsPerPage;
@@ -1665,7 +1763,7 @@ namespace Oxide.Plugins
                 AddRadiusButton(elements, $"Hood_{i}", i, 75, "0.56 0.27", "0.66 0.43");
                 AddRadiusButton(elements, $"Hood_{i}", i, 100, "0.68 0.27", "0.78 0.43");
 
-                // Clear HQ TC button
+                // Clear HQ TC button or Set HQ TC button
                 if (hasTC)
                 {
                     elements.Add(new CuiButton
@@ -1673,6 +1771,16 @@ namespace Oxide.Plugins
                         Button = { Color = "0.6 0.2 0.2 1", Command = $"hoodwars.admin clearhqtc {i}" },
                         RectTransform = { AnchorMin = "0.02 0.05", AnchorMax = "0.25 0.2" },
                         Text = { Text = "Clear HQ TC", FontSize = 10, Align = TextAnchor.MiddleCenter }
+                    }, $"Hood_{i}");
+                }
+                else
+                {
+                    // Add "Set Looked TC" button for admins to manually set the TC
+                    elements.Add(new CuiButton
+                    {
+                        Button = { Color = "0.3 0.5 0.3 1", Command = $"hoodwars.admin sethqtc {i}" },
+                        RectTransform = { AnchorMin = "0.02 0.05", AnchorMax = "0.28 0.2" },
+                        Text = { Text = "Set Looked TC", FontSize = 10, Align = TextAnchor.MiddleCenter }
                     }, $"Hood_{i}");
                 }
 
@@ -1876,16 +1984,24 @@ namespace Oxide.Plugins
             elements.Add(new CuiButton
             {
                 Button = { Color = "0.6 0.3 0.3 1", Command = "hoodwars.admin resetdoor" },
-                RectTransform = { AnchorMin = $"0.02 {y - rowHeight}", AnchorMax = $"0.48 {y}" },
-                Text = { Text = "Reset Door (Evict)", FontSize = 11, Align = TextAnchor.MiddleCenter }
+                RectTransform = { AnchorMin = $"0.02 {y - rowHeight}", AnchorMax = $"0.32 {y}" },
+                Text = { Text = "Reset Door (Evict)", FontSize = 10, Align = TextAnchor.MiddleCenter }
+            }, "Content");
+
+            // Force Expire Timer button (for testing eviction)
+            elements.Add(new CuiButton
+            {
+                Button = { Color = manualDoorLoaded ? "0.7 0.5 0.2 1" : "0.4 0.4 0.4 1", Command = "hoodwars.admin forceexpire" },
+                RectTransform = { AnchorMin = $"0.34 {y - rowHeight}", AnchorMax = $"0.64 {y}" },
+                Text = { Text = "Force Expire Timer", FontSize = 10, Align = TextAnchor.MiddleCenter }
             }, "Content");
 
             // List Hotel Doors button
             elements.Add(new CuiButton
             {
                 Button = { Color = "0.4 0.4 0.5 1", Command = "hoodwars.admin listdoors" },
-                RectTransform = { AnchorMin = $"0.52 {y - rowHeight}", AnchorMax = $"0.98 {y}" },
-                Text = { Text = "List Nearby Doors", FontSize = 11, Align = TextAnchor.MiddleCenter }
+                RectTransform = { AnchorMin = $"0.66 {y - rowHeight}", AnchorMax = $"0.98 {y}" },
+                Text = { Text = "List Nearby Doors", FontSize = 10, Align = TextAnchor.MiddleCenter }
             }, "Content");
 
             y -= rowHeight + spacing;
@@ -2090,10 +2206,29 @@ namespace Oxide.Plugins
                                      "/hoodadmin additem <prefab> - Add hotel item\n" +
                                      "/hoodadmin setradius <idx> <meters> - Set HQ radius\n" +
                                      "/hoodadmin setwarning <seconds> - Set warning interval\n" +
+                                     "/hoodadmin sethqtc <gang_idx> - Set looked TC as gang HQ TC\n" +
                                      "/hoodadmin spawndoor - Spawn hotel door at position\n" +
                                      "/hoodadmin testevict - Test evict from nearest door\n" +
+                                     "/hoodadmin forceexpire - Force expire door claim (test timer)\n" +
                                      "/hoodadmin doorinfo - Get info on nearest hotel door\n" +
                                      "/hoodadmin resetdoor - Reset nearest door claim");
+                    break;
+
+                case "sethqtc":
+                    if (args.Length < 2)
+                    {
+                        SendReply(player, "Usage: /hoodadmin sethqtc <gang_index: 0=West, 1=North, 2=South, 3=East>");
+                        return;
+                    }
+                    int tcIdx;
+                    if (int.TryParse(args[1], out tcIdx))
+                    {
+                        SetHQTCFromLook(player, tcIdx);
+                    }
+                    break;
+
+                case "forceexpire":
+                    ForceExpireNearestDoor(player);
                     break;
 
                 case "spawndoor":

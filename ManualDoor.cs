@@ -1165,6 +1165,34 @@ namespace Oxide.Plugins
                 SendReply(p, msg);
         }
 
+        // API method for HoodWars to force-expire a claim (for testing eviction timer)
+        private bool API_ForceExpireClaim(ulong doorId)
+        {
+            if (!data.Doors.TryGetValue(doorId, out var info))
+                return false;
+
+            if (info.ClaimedBy == 0)
+                return false;
+
+            ExpireClaim(doorId, info);
+            return true;
+        }
+
+        // API method to get door info for HoodWars
+        private Dictionary<string, object> API_GetDoorInfo(ulong doorId)
+        {
+            if (!data.Doors.TryGetValue(doorId, out var info))
+                return null;
+
+            return new Dictionary<string, object>
+            {
+                ["ClaimedBy"] = info.ClaimedBy,
+                ["ClaimExpiry"] = info.ClaimExpiry,
+                ["TimeRemaining"] = GetTimeRemaining(info),
+                ["EvictedCount"] = info.EvictedPlayers.Count
+            };
+        }
+
         #endregion
 
         #region Claim UI
