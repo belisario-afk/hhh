@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("HoodWars", "Gemini", "7.9.2")]
+    [Info("HoodWars", "Gemini", "7.9.4")]
     [Description("A robust, comprehensive gang-based territory and identity system for a unique vanilla-feel Rust experience.")]
     public class HoodWars : RustPlugin
     {
@@ -32,6 +32,10 @@ namespace Oxide.Plugins
         // ManualDoor plugin reference for hotel door integration
         [PluginReference]
         private Plugin ManualDoor;
+
+        // GangKits plugin reference for gang outfit/weapon integration
+        [PluginReference]
+        private Plugin GangKits;
 
         private const string PrefabMarker = "assets/prefabs/tools/map/genericradiusmarker.prefab";
         private const string PrefabSphere = "assets/prefabs/visualization/sphere.prefab";
@@ -1356,6 +1360,14 @@ namespace Oxide.Plugins
                     ResetGangTCFromUI(player, arg.Args[1]);
                     ShowAdminUI(player);
                     break;
+
+                case "testallkits":
+                    TestAllGangKits(player);
+                    break;
+
+                case "givemykit":
+                    GivePlayerGangKit(player);
+                    break;
             }
         }
 
@@ -1463,6 +1475,45 @@ namespace Oxide.Plugins
             {
                 SendReply(player, "<color=#ffaa00>INFO:</color> No HQ TC was registered for that gang.");
             }
+        }
+
+        // Test all gang kits (calls GangKits plugin)
+        private void TestAllGangKits(BasePlayer player)
+        {
+            if (GangKits == null || !GangKits.IsLoaded)
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> GangKits plugin is not loaded.");
+                return;
+            }
+
+            // Call the testallkits command on the player
+            player.SendConsoleCommand("chat.say", "/testallkits");
+            SendReply(player, "<color=#55ff55>GANG KITS TEST:</color> All 4 gang kits spawned. Check your inventory.");
+        }
+
+        // Give player their gang's kit
+        private void GivePlayerGangKit(BasePlayer player)
+        {
+            if (GangKits == null || !GangKits.IsLoaded)
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> GangKits plugin is not loaded.");
+                return;
+            }
+
+            var playerInfo = GetPlayerData(player.userID);
+            if (playerInfo.HomeHood == NeighborhoodType.Neutral)
+            {
+                SendReply(player, "<color=#ffaa00>INFO:</color> You are not in a gang. Join a gang first by building a TC in gang territory.");
+                return;
+            }
+
+            var hoodConfig = GetNeighborhoodConfig(playerInfo.HomeHood);
+            string gangName = hoodConfig?.Name ?? "Unknown";
+
+            // Call GangKits to give the kit - it will automatically detect the player's gang
+            // We simulate this by triggering the OnPlayerRespawned-like behavior
+            GangKits.Call("API_GiveGangKit", player, gangName);
+            SendReply(player, $"<color=#55ff55>GANG KIT:</color> Gave you your <color={hoodConfig?.HexColor ?? "#ffffff"}>{gangName}</color> kit.");
         }
 
         // Admin command to set the TC they're looking at as the HQ TC for a gang
@@ -2077,12 +2128,21 @@ namespace Oxide.Plugins
                 }, "Content");
             }
 
-            // Help text
-            elements.Add(new CuiLabel
+            // GangKits test button (if GangKits plugin is loaded)
+            bool gangKitsLoaded = GangKits != null && GangKits.IsLoaded;
+            elements.Add(new CuiButton
             {
-                Text = { Text = "Commands: /testsafezone, /testtrespass, /listhoteldoors, /hoodadmin spawntc", 
-                        FontSize = 9, Align = TextAnchor.MiddleCenter, Color = "0.5 0.5 0.5 1" },
-                RectTransform = { AnchorMin = "0.02 0.02", AnchorMax = "0.98 0.1" }
+                Button = { Color = gangKitsLoaded ? "0.5 0.3 0.6 1" : "0.4 0.4 0.4 1", Command = "hoodwars.admin testallkits" },
+                RectTransform = { AnchorMin = "0.02 0.05", AnchorMax = "0.48 0.13" },
+                Text = { Text = gangKitsLoaded ? "Test All Gang Kits" : "GangKits N/A", FontSize = 10, Align = TextAnchor.MiddleCenter }
+            }, "Content");
+
+            // Give My Kit button
+            elements.Add(new CuiButton
+            {
+                Button = { Color = gangKitsLoaded ? "0.3 0.5 0.6 1" : "0.4 0.4 0.4 1", Command = "hoodwars.admin givemykit" },
+                RectTransform = { AnchorMin = "0.52 0.05", AnchorMax = "0.98 0.13" },
+                Text = { Text = gangKitsLoaded ? "Give My Gang Kit" : "GangKits N/A", FontSize = 10, Align = TextAnchor.MiddleCenter }
             }, "Content");
         }
 
@@ -2553,6 +2613,19 @@ namespace Oxide.Plugins
         {
             var hqHood = GetHQAtPosition(position);
             return hqHood?.Name ?? "Neutral";
+        }
+
+        // API method to get a player's gang name by user ID (used by GangKits)
+        private string GetPlayerGangName(ulong playerId)
+        {
+            if (_config == null || _storedData == null) return "Neutral";
+            
+            var playerInfo = GetPlayerData(playerId);
+            if (playerInfo.HomeHood == NeighborhoodType.Neutral)
+                return "Neutral";
+            
+            var hoodConfig = GetNeighborhoodConfig(playerInfo.HomeHood);
+            return hoodConfig?.Name ?? "Neutral";
         }
 
         #endregion

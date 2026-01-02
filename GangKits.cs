@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("GangKits", "Gemini", "1.2.0")]
+    [Info("GangKits", "Gemini", "1.3.0")]
     [Description("Automatic permanent gang outfits and weapons. Includes admin testing tools.")]
     public class GangKits : RustPlugin
     {
@@ -104,6 +104,12 @@ namespace Oxide.Plugins
         #endregion
 
         #region Core Logic
+
+        // API method for external plugins to give a player their gang kit
+        private void API_GiveGangKit(BasePlayer player, string gangName = null)
+        {
+            GiveGangKit(player, gangName);
+        }
 
         private void GiveGangKit(BasePlayer player, string forcedGang = null)
         {
