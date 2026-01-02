@@ -3,13 +3,14 @@ using System.Collections.Generic;
 using System.Linq;
 using Oxide.Core;
 using Oxide.Core.Configuration;
+using Oxide.Core.Plugins;
 using Oxide.Game.Rust.Cui;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("ManualDoor", "Gemini", "3.3.0")]
-    [Description("Spawns permanent, non-decaying doors with claim timers, eviction, and admin move/rotate GUI.")]
+    [Info("ManualDoor", "Gemini", "3.4.0")]
+    [Description("Spawns permanent, non-decaying doors with claim timers, eviction, and admin move/rotate GUI. Integrates with HoodWars for gang-based hotel rooms.")]
     public class ManualDoor : RustPlugin
     {
         private const string DoorPrefab = "assets/prefabs/building/door.hinged/door.hinged.metal.prefab";
@@ -23,6 +24,10 @@ namespace Oxide.Plugins
 
         private StoredData data;
         private DynamicConfigFile dataFile;
+
+        // HoodWars plugin reference for gang integration
+        [PluginReference]
+        private Plugin HoodWars;
 
         // doorNetId -> timer
         private readonly Dictionary<ulong, Timer> claimTimers = new Dictionary<ulong, Timer>();
@@ -348,7 +353,35 @@ namespace Oxide.Plugins
                 return;
             }
 
+            // Check HoodWars gang restrictions if plugin is loaded
+            if (!CanPlayerClaimDoor(player, parent))
+            {
+                return; // HoodWars blocked the claim
+            }
+
             ClaimDoor(parent, info, player, code);
+        }
+
+        // Check with HoodWars if player can claim this door based on gang affiliation
+        private bool CanPlayerClaimDoor(BasePlayer player, BaseEntity door)
+        {
+            if (HoodWars == null || !HoodWars.IsLoaded)
+                return true; // HoodWars not loaded, allow claim
+
+            // Call HoodWars API to check if player can claim in this HQ
+            var result = HoodWars.Call("API_CanPlayerClaimInHQ", player, door.transform.position);
+            if (result is bool canClaim)
+            {
+                if (!canClaim)
+                {
+                    // Get the gang name for a more helpful message
+                    var gangName = HoodWars.Call("API_GetHQGangName", door.transform.position);
+                    SendReply(player, $"<color=#ff6666>You cannot claim doors in {gangName} HQ. Only gang members can claim hotel rooms in their own HQ.</color>");
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         #endregion
@@ -447,6 +480,12 @@ namespace Oxide.Plugins
             {
                 SendReply(player, "<color=#ff6666>You were recently evicted from this door and cannot reclaim it.</color>");
                 return;
+            }
+
+            // Check HoodWars gang restrictions
+            if (!CanPlayerClaimDoor(player, ent))
+            {
+                return; // HoodWars blocked the claim
             }
 
             // Attach lock if missing

@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("HoodWars", "Gemini", "7.8.1")]
+    [Info("HoodWars", "Gemini", "7.9.0")]
     [Description("A robust, comprehensive gang-based territory and identity system for a unique vanilla-feel Rust experience.")]
     public class HoodWars : RustPlugin
     {
@@ -28,6 +28,10 @@ namespace Oxide.Plugins
         
         // Timer for periodic updates
         private Timer _identityTimer;
+
+        // ManualDoor plugin reference for hotel door integration
+        [PluginReference]
+        private Plugin ManualDoor;
 
         private const string PrefabMarker = "assets/prefabs/tools/map/genericradiusmarker.prefab";
         private const string PrefabSphere = "assets/prefabs/visualization/sphere.prefab";
@@ -1276,6 +1280,143 @@ namespace Oxide.Plugins
                         ShowAdminUI(player);
                     }
                     break;
+
+                // Testing commands
+                case "testsafezone":
+                    TestSafezoneFromUI(player);
+                    break;
+
+                case "testtrespass":
+                    TestTrespassFromUI(player);
+                    break;
+
+                case "spawndoor":
+                    SpawnHotelDoor(player);
+                    break;
+
+                case "doorinfo":
+                    GetHotelDoorInfo(player);
+                    break;
+
+                case "resetdoor":
+                    ResetHotelDoor(player);
+                    break;
+
+                case "listdoors":
+                    ListNearbyDoors(player);
+                    break;
+
+                case "resetgangtc":
+                    if (arg.Args.Length < 2) return;
+                    ResetGangTCFromUI(player, arg.Args[1]);
+                    ShowAdminUI(player);
+                    break;
+            }
+        }
+
+        // UI-triggered test methods
+        private void TestSafezoneFromUI(BasePlayer player)
+        {
+            var hqHood = GetHQAtPosition(player.transform.position);
+            if (hqHood == null)
+            {
+                SendReply(player, "<color=#ffaa00>SAFEZONE TEST:</color> You are NOT in any HQ safezone.");
+                return;
+            }
+
+            var playerInfo = GetPlayerData(player.userID);
+            bool isOwner = playerInfo.HomeHood == hqHood.Type;
+
+            SendReply(player, $"<color=#55ff55>SAFEZONE TEST:</color>\n" +
+                             $"HQ Zone: <color={hqHood.HexColor}>{hqHood.Name}</color>\n" +
+                             $"Your Gang: {playerInfo.HomeHood}\n" +
+                             $"Is Your HQ: {(isOwner ? "<color=#55ff55>YES</color>" : "<color=#ff4444>NO</color>")}\n" +
+                             $"Can Build: {(isOwner ? "<color=#55ff55>Hotel items only</color>" : "<color=#ff4444>NO</color>")}\n" +
+                             $"Can Take Damage: <color=#55ff55>NO (Protected)</color>\n" +
+                             $"Safezones Active: {(_config.HQ.EnableHQSafezones ? "<color=#55ff55>YES</color>" : "<color=#ff4444>NO</color>")}");
+        }
+
+        private void TestTrespassFromUI(BasePlayer player)
+        {
+            var hqHood = GetHQAtPosition(player.transform.position);
+            if (hqHood == null)
+            {
+                SendReply(player, "<color=#ffaa00>TRESPASS TEST:</color> You are NOT in any HQ zone.");
+                return;
+            }
+
+            var playerInfo = GetPlayerData(player.userID);
+            if (playerInfo.HomeHood == hqHood.Type)
+            {
+                SendReply(player, GetMsg("HQ_Safezone", player.UserIDString, hqHood.Name));
+            }
+            else
+            {
+                SendReply(player, GetMsg("HQ_Trespass", player.UserIDString, hqHood.HexColor, hqHood.Name));
+            }
+        }
+
+        private void ListNearbyDoors(BasePlayer player)
+        {
+            var hqHood = GetHQAtPosition(player.transform.position);
+            if (hqHood == null)
+            {
+                SendReply(player, "<color=#ffaa00>INFO:</color> You are not in an HQ zone. Stand in an HQ area to list doors.");
+                return;
+            }
+
+            var doorsInHQ = BaseNetworkable.serverEntities.OfType<Door>()
+                .Where(d => d != null && GetHQAtPosition(d.transform.position)?.Type == hqHood.Type)
+                .Take(10)
+                .ToList();
+
+            SendReply(player, $"<color=#55ff55>DOORS IN {hqHood.Name.ToUpper()} HQ:</color>");
+            
+            if (doorsInHQ.Count == 0)
+            {
+                SendReply(player, "No doors found in this HQ zone.");
+                return;
+            }
+
+            int count = 0;
+            foreach (var door in doorsInHQ)
+            {
+                count++;
+                float dist = Vector3.Distance(player.transform.position, door.transform.position);
+                SendReply(player, $"{count}. Distance: {dist:F1}m | ID: {door.net?.ID.Value}");
+            }
+        }
+
+        private void ResetGangTCFromUI(BasePlayer player, string gangType)
+        {
+            NeighborhoodType type;
+            switch (gangType.ToLower())
+            {
+                case "west":
+                    type = NeighborhoodType.West;
+                    break;
+                case "north":
+                    type = NeighborhoodType.North;
+                    break;
+                case "south":
+                    type = NeighborhoodType.South;
+                    break;
+                case "east":
+                    type = NeighborhoodType.East;
+                    break;
+                default:
+                    SendReply(player, "<color=#ff4444>ERROR:</color> Invalid gang type.");
+                    return;
+            }
+
+            if (_hqToolCupboards.Remove(type))
+            {
+                var hood = GetNeighborhoodConfig(type);
+                SendReply(player, $"<color=#55ff55>SUCCESS:</color> HQ TC registration cleared for {hood?.Name ?? type.ToString()}.");
+            }
+            else
+            {
+                SendReply(player, "<color=#ffaa00>INFO:</color> No HQ TC was registered for that gang.");
             }
         }
 
@@ -1318,11 +1459,12 @@ namespace Oxide.Plugins
             }, "Header");
 
             // Navigation tabs
-            AddNavTab(elements, "main", "Main Menu", "0.01 0.82", "0.15 0.88", section == "main");
-            AddNavTab(elements, "hq", "HQ Settings", "0.16 0.82", "0.30 0.88", section == "hq");
-            AddNavTab(elements, "neighborhoods", "Neighborhoods", "0.31 0.82", "0.48 0.88", section == "neighborhoods");
-            AddNavTab(elements, "hotelitems", "Hotel Items", "0.49 0.82", "0.63 0.88", section == "hotelitems");
-            AddNavTab(elements, "general", "General", "0.64 0.82", "0.78 0.88", section == "general");
+            AddNavTab(elements, "main", "Main", "0.01 0.82", "0.12 0.88", section == "main");
+            AddNavTab(elements, "hq", "HQ", "0.13 0.82", "0.24 0.88", section == "hq");
+            AddNavTab(elements, "neighborhoods", "Hoods", "0.25 0.82", "0.38 0.88", section == "neighborhoods");
+            AddNavTab(elements, "hotelitems", "Hotel", "0.39 0.82", "0.50 0.88", section == "hotelitems");
+            AddNavTab(elements, "general", "General", "0.51 0.82", "0.64 0.88", section == "general");
+            AddNavTab(elements, "testing", "Testing", "0.65 0.82", "0.78 0.88", section == "testing");
 
             // Content area
             elements.Add(new CuiPanel
@@ -1347,6 +1489,9 @@ namespace Oxide.Plugins
                     break;
                 case "general":
                     AddGeneralSettingsContent(elements);
+                    break;
+                case "testing":
+                    AddTestingContent(elements, player);
                     break;
             }
 
@@ -1662,6 +1807,123 @@ namespace Oxide.Plugins
             }, "Content");
         }
 
+        private void AddTestingContent(CuiElementContainer elements, BasePlayer player)
+        {
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = "Admin Testing Tools", FontSize = 16, Align = TextAnchor.MiddleCenter, Color = "1 0.8 0.2 1" },
+                RectTransform = { AnchorMin = "0 0.88", AnchorMax = "1 0.98" }
+            }, "Content");
+
+            float y = 0.82f;
+            float rowHeight = 0.1f;
+            float spacing = 0.02f;
+
+            // Current location status
+            var hqHood = GetHQAtPosition(player.transform.position);
+            var playerInfo = GetPlayerData(player.userID);
+            string locationStatus = hqHood != null 
+                ? $"In <color={hqHood.HexColor}>{hqHood.Name}</color> HQ" 
+                : "Not in any HQ zone";
+
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = $"Current Location: {locationStatus} | Your Gang: {playerInfo.HomeHood}", 
+                        FontSize = 11, Align = TextAnchor.MiddleCenter, Color = "0.8 0.8 0.8 1" },
+                RectTransform = { AnchorMin = "0.02 0.72", AnchorMax = "0.98 0.82" }
+            }, "Content");
+
+            y = 0.68f;
+
+            // Test Safezone button
+            elements.Add(new CuiButton
+            {
+                Button = { Color = "0.3 0.5 0.6 1", Command = "hoodwars.admin testsafezone" },
+                RectTransform = { AnchorMin = $"0.02 {y - rowHeight}", AnchorMax = $"0.48 {y}" },
+                Text = { Text = "Test Safezone Status", FontSize = 11, Align = TextAnchor.MiddleCenter }
+            }, "Content");
+
+            // Test Trespass button
+            elements.Add(new CuiButton
+            {
+                Button = { Color = "0.6 0.4 0.2 1", Command = "hoodwars.admin testtrespass" },
+                RectTransform = { AnchorMin = $"0.52 {y - rowHeight}", AnchorMax = $"0.98 {y}" },
+                Text = { Text = "Test Trespass Warning", FontSize = 11, Align = TextAnchor.MiddleCenter }
+            }, "Content");
+
+            y -= rowHeight + spacing;
+
+            // Spawn Door button (requires ManualDoor)
+            bool manualDoorLoaded = ManualDoor != null && ManualDoor.IsLoaded;
+            elements.Add(new CuiButton
+            {
+                Button = { Color = manualDoorLoaded ? "0.3 0.6 0.3 1" : "0.4 0.4 0.4 1", Command = "hoodwars.admin spawndoor" },
+                RectTransform = { AnchorMin = $"0.02 {y - rowHeight}", AnchorMax = $"0.48 {y}" },
+                Text = { Text = manualDoorLoaded ? "Spawn Hotel Door" : "ManualDoor Not Loaded", FontSize = 11, Align = TextAnchor.MiddleCenter }
+            }, "Content");
+
+            // Door Info button
+            elements.Add(new CuiButton
+            {
+                Button = { Color = manualDoorLoaded ? "0.4 0.5 0.4 1" : "0.4 0.4 0.4 1", Command = "hoodwars.admin doorinfo" },
+                RectTransform = { AnchorMin = $"0.52 {y - rowHeight}", AnchorMax = $"0.98 {y}" },
+                Text = { Text = "Get Door Info", FontSize = 11, Align = TextAnchor.MiddleCenter }
+            }, "Content");
+
+            y -= rowHeight + spacing;
+
+            // Reset Door button
+            elements.Add(new CuiButton
+            {
+                Button = { Color = "0.6 0.3 0.3 1", Command = "hoodwars.admin resetdoor" },
+                RectTransform = { AnchorMin = $"0.02 {y - rowHeight}", AnchorMax = $"0.48 {y}" },
+                Text = { Text = "Reset Door (Evict)", FontSize = 11, Align = TextAnchor.MiddleCenter }
+            }, "Content");
+
+            // List Hotel Doors button
+            elements.Add(new CuiButton
+            {
+                Button = { Color = "0.4 0.4 0.5 1", Command = "hoodwars.admin listdoors" },
+                RectTransform = { AnchorMin = $"0.52 {y - rowHeight}", AnchorMax = $"0.98 {y}" },
+                Text = { Text = "List Nearby Doors", FontSize = 11, Align = TextAnchor.MiddleCenter }
+            }, "Content");
+
+            y -= rowHeight + spacing;
+
+            // Gang TC Reset buttons
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = "--- Reset Gang HQ TC Registration ---", FontSize = 11, Align = TextAnchor.MiddleCenter, Color = "0.7 0.7 0.7 1" },
+                RectTransform = { AnchorMin = "0.02 0.26", AnchorMax = "0.98 0.34" }
+            }, "Content");
+
+            // Four gang reset buttons
+            float buttonWidth = 0.23f;
+            float buttonStart = 0.02f;
+            string[] gangs = { "West", "North", "South", "East" };
+            string[] colors = { "0.7 0.3 0.3 1", "0.7 0.7 0.2 1", "0.3 0.3 0.7 1", "0.4 0.4 0.4 1" };
+
+            for (int i = 0; i < 4; i++)
+            {
+                float xMin = buttonStart + i * (buttonWidth + 0.01f);
+                float xMax = xMin + buttonWidth;
+                elements.Add(new CuiButton
+                {
+                    Button = { Color = colors[i], Command = $"hoodwars.admin resetgangtc {gangs[i].ToLower()}" },
+                    RectTransform = { AnchorMin = $"{xMin} 0.15", AnchorMax = $"{xMax} 0.24" },
+                    Text = { Text = $"Reset {gangs[i]}", FontSize = 10, Align = TextAnchor.MiddleCenter }
+                }, "Content");
+            }
+
+            // Help text
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = "Chat commands: /testsafezone, /testtrespass, /listhoteldoors, /resetgangtc <gang>", 
+                        FontSize = 9, Align = TextAnchor.MiddleCenter, Color = "0.5 0.5 0.5 1" },
+                RectTransform = { AnchorMin = "0.02 0.02", AnchorMax = "0.98 0.1" }
+            }, "Content");
+        }
+
         private void AddSettingRow(CuiElementContainer elements, ref float y, float rowHeight, string label, string value, string buttonColor, string command)
         {
             elements.Add(new CuiPanel
@@ -1827,12 +2089,337 @@ namespace Oxide.Plugins
                                      "/hoodadmin - Open admin GUI\n" +
                                      "/hoodadmin additem <prefab> - Add hotel item\n" +
                                      "/hoodadmin setradius <idx> <meters> - Set HQ radius\n" +
-                                     "/hoodadmin setwarning <seconds> - Set warning interval");
+                                     "/hoodadmin setwarning <seconds> - Set warning interval\n" +
+                                     "/hoodadmin spawndoor - Spawn hotel door at position\n" +
+                                     "/hoodadmin testevict - Test evict from nearest door\n" +
+                                     "/hoodadmin doorinfo - Get info on nearest hotel door\n" +
+                                     "/hoodadmin resetdoor - Reset nearest door claim");
+                    break;
+
+                case "spawndoor":
+                    SpawnHotelDoor(player);
+                    break;
+
+                case "testevict":
+                    TestEvictDoor(player);
+                    break;
+
+                case "doorinfo":
+                    GetHotelDoorInfo(player);
+                    break;
+
+                case "resetdoor":
+                    ResetHotelDoor(player);
                     break;
 
                 default:
                     SendReply(player, "Unknown command. Use /hoodadmin help for commands.");
                     break;
+            }
+        }
+
+        #endregion
+
+        #region ManualDoor Integration
+
+        // Check if ManualDoor plugin is loaded and available
+        private bool IsManualDoorLoaded()
+        {
+            return ManualDoor != null && ManualDoor.IsLoaded;
+        }
+
+        // Spawn a hotel door at player's position (uses ManualDoor plugin)
+        private void SpawnHotelDoor(BasePlayer player)
+        {
+            if (!IsManualDoorLoaded())
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> ManualDoor plugin is not loaded. Install ManualDoor.cs to use hotel doors.");
+                return;
+            }
+
+            // Check if player is in an HQ zone
+            var hqHood = GetHQAtPosition(player.transform.position);
+            if (hqHood == null)
+            {
+                SendReply(player, "<color=#ffaa00>WARNING:</color> You are not in an HQ zone. Hotel doors should be placed in HQ areas.");
+            }
+
+            // Execute ManualDoor's spawndoor command
+            player.SendConsoleCommand("chat.say", "/spawndoor");
+            SendReply(player, "<color=#55ff55>SUCCESS:</color> Use the ManualDoor /spawndoor command to place a hotel door.");
+        }
+
+        // Test eviction from the nearest hotel door
+        private void TestEvictDoor(BasePlayer player)
+        {
+            if (!IsManualDoorLoaded())
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> ManualDoor plugin is not loaded.");
+                return;
+            }
+
+            // Find nearest door entity
+            var nearestDoor = FindNearestHotelDoor(player.transform.position, 5f);
+            if (nearestDoor == null)
+            {
+                SendReply(player, "<color=#ffaa00>INFO:</color> No hotel door found within 5m. Look at a door and try again.");
+                return;
+            }
+
+            // Call ManualDoor to reset/evict
+            player.SendConsoleCommand("chat.say", "/resetdoor");
+            SendReply(player, "<color=#55ff55>EVICTION TEST:</color> Attempting to reset the nearby door claim. The previous claimant will be evicted.");
+        }
+
+        // Get info about nearest hotel door
+        private void GetHotelDoorInfo(BasePlayer player)
+        {
+            if (!IsManualDoorLoaded())
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> ManualDoor plugin is not loaded.");
+                return;
+            }
+
+            // Execute ManualDoor's doorinfo command
+            player.SendConsoleCommand("chat.say", "/doorinfo");
+        }
+
+        // Reset the nearest hotel door claim
+        private void ResetHotelDoor(BasePlayer player)
+        {
+            if (!IsManualDoorLoaded())
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> ManualDoor plugin is not loaded.");
+                return;
+            }
+
+            // Execute ManualDoor's resetdoor command
+            player.SendConsoleCommand("chat.say", "/resetdoor");
+            SendReply(player, "<color=#55ff55>SUCCESS:</color> Door claim has been reset.");
+        }
+
+        // Find the nearest hotel door entity
+        private BaseEntity FindNearestHotelDoor(Vector3 pos, float maxDistance)
+        {
+            BaseEntity nearest = null;
+            float nearestDist = maxDistance;
+
+            // Find all doors within range
+            var entities = BaseNetworkable.serverEntities.OfType<Door>();
+            foreach (var door in entities)
+            {
+                if (door == null) continue;
+                float dist = Vector3.Distance(door.transform.position, pos);
+                if (dist < nearestDist)
+                {
+                    nearestDist = dist;
+                    nearest = door;
+                }
+            }
+
+            return nearest;
+        }
+
+        // Hook into ManualDoor's door claiming to restrict based on gang
+        private object CanClaimHotelDoor(BasePlayer player, BaseEntity door)
+        {
+            if (player == null || door == null || _config == null || _config.HQ == null) return null;
+            if (!_config.HQ.EnableHQSafezones) return null;
+
+            var hqHood = GetHQAtPosition(door.transform.position);
+            if (hqHood == null) return null; // Not in HQ, allow normal claiming
+
+            var playerInfo = GetPlayerData(player.userID);
+
+            // Only gang members can claim doors in their own HQ
+            if (playerInfo.HomeHood != hqHood.Type)
+            {
+                SendReply(player, GetMsg("HQ_NotYourHQ", player.UserIDString));
+                return false; // Block claim
+            }
+
+            return null; // Allow claim
+        }
+
+        // Called by ManualDoor when a player tries to claim a door (API hook)
+        private object OnDoorClaim(BasePlayer player, ulong doorNetId)
+        {
+            // Find the door entity
+            var door = BaseNetworkable.serverEntities.FirstOrDefault(e => e.net?.ID.Value == doorNetId) as BaseEntity;
+            if (door == null) return null;
+
+            return CanClaimHotelDoor(player, door);
+        }
+
+        // API method for ManualDoor to check if player can claim in this location
+        private bool API_CanPlayerClaimInHQ(BasePlayer player, Vector3 position)
+        {
+            if (_config == null || _config.HQ == null || !_config.HQ.EnableHQSafezones) return true;
+
+            var hqHood = GetHQAtPosition(position);
+            if (hqHood == null) return true; // Not in HQ
+
+            var playerInfo = GetPlayerData(player.userID);
+            return playerInfo.HomeHood == hqHood.Type;
+        }
+
+        // API method to get the gang name for a position
+        private string API_GetHQGangName(Vector3 position)
+        {
+            var hqHood = GetHQAtPosition(position);
+            return hqHood?.Name ?? "Neutral";
+        }
+
+        #endregion
+
+        #region Admin Testing Features
+
+        // Test safezone functionality
+        [ChatCommand("testsafezone")]
+        private void CmdTestSafezone(BasePlayer player, string cmd, string[] args)
+        {
+            if (!permission.UserHasPermission(player.UserIDString, PermAdmin) && !player.IsAdmin)
+            {
+                SendReply(player, "<color=#ff4444>ACCESS DENIED:</color> Admin only.");
+                return;
+            }
+
+            var hqHood = GetHQAtPosition(player.transform.position);
+            if (hqHood == null)
+            {
+                SendReply(player, "<color=#ffaa00>SAFEZONE TEST:</color> You are NOT in any HQ safezone.");
+                return;
+            }
+
+            var playerInfo = GetPlayerData(player.userID);
+            bool isOwner = playerInfo.HomeHood == hqHood.Type;
+
+            SendReply(player, $"<color=#55ff55>SAFEZONE TEST:</color>\n" +
+                             $"HQ Zone: <color={hqHood.HexColor}>{hqHood.Name}</color>\n" +
+                             $"Your Gang: {playerInfo.HomeHood}\n" +
+                             $"Is Your HQ: {(isOwner ? "<color=#55ff55>YES</color>" : "<color=#ff4444>NO</color>")}\n" +
+                             $"Can Build: {(isOwner ? "<color=#55ff55>Hotel items only</color>" : "<color=#ff4444>NO</color>")}\n" +
+                             $"Can Take Damage: <color=#55ff55>NO (Protected)</color>\n" +
+                             $"Safezones Active: {(_config.HQ.EnableHQSafezones ? "<color=#55ff55>YES</color>" : "<color=#ff4444>NO</color>")}");
+        }
+
+        // Test trespass warning
+        [ChatCommand("testtrespass")]
+        private void CmdTestTrespass(BasePlayer player, string cmd, string[] args)
+        {
+            if (!permission.UserHasPermission(player.UserIDString, PermAdmin) && !player.IsAdmin)
+            {
+                SendReply(player, "<color=#ff4444>ACCESS DENIED:</color> Admin only.");
+                return;
+            }
+
+            var hqHood = GetHQAtPosition(player.transform.position);
+            if (hqHood == null)
+            {
+                SendReply(player, "<color=#ffaa00>TRESPASS TEST:</color> You are NOT in any HQ zone.");
+                return;
+            }
+
+            // Force send trespass warning regardless of cooldown
+            var playerInfo = GetPlayerData(player.userID);
+            if (playerInfo.HomeHood == hqHood.Type)
+            {
+                SendReply(player, GetMsg("HQ_Safezone", player.UserIDString, hqHood.Name));
+            }
+            else
+            {
+                SendReply(player, GetMsg("HQ_Trespass", player.UserIDString, hqHood.HexColor, hqHood.Name));
+            }
+        }
+
+        // List all hotel doors in current HQ
+        [ChatCommand("listhoteldoors")]
+        private void CmdListHotelDoors(BasePlayer player, string cmd, string[] args)
+        {
+            if (!permission.UserHasPermission(player.UserIDString, PermAdmin) && !player.IsAdmin)
+            {
+                SendReply(player, "<color=#ff4444>ACCESS DENIED:</color> Admin only.");
+                return;
+            }
+
+            var hqHood = GetHQAtPosition(player.transform.position);
+            if (hqHood == null)
+            {
+                SendReply(player, "<color=#ffaa00>INFO:</color> You are not in an HQ zone. Stand in an HQ area to list doors.");
+                return;
+            }
+
+            // Find all doors in this HQ zone
+            var doorsInHQ = BaseNetworkable.serverEntities.OfType<Door>()
+                .Where(d => d != null && GetHQAtPosition(d.transform.position)?.Type == hqHood.Type)
+                .Take(20)
+                .ToList();
+
+            SendReply(player, $"<color=#55ff55>HOTEL DOORS IN {hqHood.Name.ToUpper()}:</color>");
+            
+            if (doorsInHQ.Count == 0)
+            {
+                SendReply(player, "No doors found in this HQ zone.");
+                return;
+            }
+
+            int count = 0;
+            foreach (var door in doorsInHQ)
+            {
+                count++;
+                float dist = Vector3.Distance(player.transform.position, door.transform.position);
+                var codeLock = door.GetSlot(BaseEntity.Slot.Lock) as CodeLock;
+                bool hasLock = codeLock != null;
+                bool isLocked = hasLock && codeLock.IsLocked();
+
+                SendReply(player, $"{count}. Distance: {dist:F1}m | Lock: {(hasLock ? (isLocked ? "Locked" : "Unlocked") : "None")} | ID: {door.net?.ID.Value}");
+            }
+        }
+
+        // Force claim reset for a gang's HQ TC
+        [ChatCommand("resetgangtc")]
+        private void CmdResetGangTC(BasePlayer player, string cmd, string[] args)
+        {
+            if (!permission.UserHasPermission(player.UserIDString, PermAdmin) && !player.IsAdmin)
+            {
+                SendReply(player, "<color=#ff4444>ACCESS DENIED:</color> Admin only.");
+                return;
+            }
+
+            if (args.Length == 0)
+            {
+                SendReply(player, "Usage: /resetgangtc <gang_type: west/north/south/east>");
+                return;
+            }
+
+            NeighborhoodType type;
+            switch (args[0].ToLower())
+            {
+                case "west":
+                    type = NeighborhoodType.West;
+                    break;
+                case "north":
+                    type = NeighborhoodType.North;
+                    break;
+                case "south":
+                    type = NeighborhoodType.South;
+                    break;
+                case "east":
+                    type = NeighborhoodType.East;
+                    break;
+                default:
+                    SendReply(player, "<color=#ff4444>ERROR:</color> Invalid gang type. Use: west, north, south, east");
+                    return;
+            }
+
+            if (_hqToolCupboards.Remove(type))
+            {
+                var hood = GetNeighborhoodConfig(type);
+                SendReply(player, $"<color=#55ff55>SUCCESS:</color> HQ TC registration cleared for {hood?.Name ?? type.ToString()}. A new TC can now be placed in their HQ.");
+            }
+            else
+            {
+                SendReply(player, "<color=#ffaa00>INFO:</color> No HQ TC was registered for that gang.");
             }
         }
 
