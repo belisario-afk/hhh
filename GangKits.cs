@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("GangKits", "Gemini", "1.3.0")]
+    [Info("GangKits", "Gemini", "1.4.0")]
     [Description("Automatic permanent gang outfits and weapons. Includes admin testing tools.")]
     public class GangKits : RustPlugin
     {
@@ -108,33 +108,70 @@ namespace Oxide.Plugins
         // API method for external plugins to give a player their gang kit
         private void API_GiveGangKit(BasePlayer player, string gangName = null)
         {
+            Puts($"[DEBUG] API_GiveGangKit called for player: {player?.displayName ?? "null"}, gangName: {gangName ?? "null"}");
             GiveGangKit(player, gangName);
         }
 
         private void GiveGangKit(BasePlayer player, string forcedGang = null)
         {
-            if (player == null) return;
+            if (player == null) 
+            {
+                Puts("[DEBUG] GiveGangKit: player is null, aborting.");
+                return;
+            }
 
             string gangName = forcedGang ?? GetPlayerGang(player);
-            if (string.IsNullOrEmpty(gangName) || gangName == "Neutral Ground" || gangName == "Neutral") return;
+            Puts($"[DEBUG] GiveGangKit: player={player.displayName}, forcedGang={forcedGang ?? "null"}, resolvedGang={gangName}");
+            
+            if (string.IsNullOrEmpty(gangName) || gangName == "Neutral Ground" || gangName == "Neutral") 
+            {
+                Puts($"[DEBUG] GiveGangKit: Gang name is '{gangName}', not a valid gang - aborting.");
+                return;
+            }
 
-            if (!_kits.TryGetValue(gangName, out var kit)) return;
+            if (!_kits.TryGetValue(gangName, out var kit)) 
+            {
+                Puts($"[DEBUG] GiveGangKit: No kit found for gang '{gangName}'. Available kits: {string.Join(", ", _kits.Keys)}");
+                return;
+            }
+            
+            Puts($"[DEBUG] GiveGangKit: Found kit for '{gangName}', giving items...");
+            int clothingGiven = 0;
+            bool weaponGiven = false;
 
             // 1. Clothing
             foreach (var shortname in kit.Clothing)
             {
-                if (forcedGang == null && IsSlotOccupied(player, shortname)) continue;
+                if (forcedGang == null && IsSlotOccupied(player, shortname)) 
+                {
+                    Puts($"[DEBUG] Skipping {shortname} - slot already occupied");
+                    continue;
+                }
 
                 ulong skin = kit.Skins.ContainsKey(shortname) ? kit.Skins[shortname] : 0;
                 Item item = ItemManager.CreateByName(shortname, 1, skin);
                 if (item != null)
                 {
                     item.name = "GANG_KIT_ITEM"; 
-                    if (!item.MoveToContainer(player.inventory.containerWear))
+                    if (item.MoveToContainer(player.inventory.containerWear))
                     {
-                        if (forcedGang != null) item.MoveToContainer(player.inventory.containerMain);
-                        else item.Remove();
+                        clothingGiven++;
+                        Puts($"[DEBUG] Gave {shortname} (skin: {skin}) to wear container");
                     }
+                    else if (forcedGang != null && item.MoveToContainer(player.inventory.containerMain))
+                    {
+                        clothingGiven++;
+                        Puts($"[DEBUG] Gave {shortname} (skin: {skin}) to main container (wear was full)");
+                    }
+                    else 
+                    {
+                        item.Remove();
+                        Puts($"[DEBUG] Failed to give {shortname} - removed item");
+                    }
+                }
+                else
+                {
+                    Puts($"[DEBUG] Failed to create item: {shortname}");
                 }
             }
 
@@ -152,13 +189,33 @@ namespace Oxide.Plugins
                         proj.SendNetworkUpdate();
                     }
 
-                    if (!weapon.MoveToContainer(player.inventory.containerBelt))
+                    if (weapon.MoveToContainer(player.inventory.containerBelt))
                     {
-                        if (forcedGang != null) weapon.MoveToContainer(player.inventory.containerMain);
-                        else weapon.Remove();
+                        weaponGiven = true;
+                        Puts($"[DEBUG] Gave weapon {kit.Weapon} to belt container");
+                    }
+                    else if (forcedGang != null && weapon.MoveToContainer(player.inventory.containerMain))
+                    {
+                        weaponGiven = true;
+                        Puts($"[DEBUG] Gave weapon {kit.Weapon} to main container (belt was full)");
+                    }
+                    else 
+                    {
+                        weapon.Remove();
+                        Puts($"[DEBUG] Failed to give weapon {kit.Weapon} - removed item");
                     }
                 }
+                else
+                {
+                    Puts($"[DEBUG] Failed to create weapon: {kit.Weapon}");
+                }
             }
+            else
+            {
+                Puts($"[DEBUG] Skipping weapon - player already has {kit.Weapon}");
+            }
+            
+            Puts($"[DEBUG] GiveGangKit complete: {clothingGiven} clothing items, weapon: {weaponGiven}");
         }
 
         private bool IsSlotOccupied(BasePlayer player, string shortname)

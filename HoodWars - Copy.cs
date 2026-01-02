@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("HoodWars", "Gemini", "7.9.4")]
+    [Info("HoodWars", "Gemini", "7.9.5")]
     [Description("A robust, comprehensive gang-based territory and identity system for a unique vanilla-feel Rust experience.")]
     public class HoodWars : RustPlugin
     {
@@ -635,6 +635,21 @@ namespace Oxide.Plugins
                 {
                     info.HomeHood = zone.Type;
                     SendReply(player, GetMsg("BloodIn", player.UserIDString, zone.Name));
+                    
+                    // Give gang kit when player bloods in
+                    Puts($"[DEBUG] Player {player.displayName} blooded into {zone.Name}, triggering GangKit...");
+                    timer.Once(0.5f, () => {
+                        if (GangKits != null)
+                        {
+                            Puts($"[DEBUG] Calling GangKits.API_GiveGangKit for {player.displayName} (gang: {zone.Name})");
+                            GangKits.Call("API_GiveGangKit", player, zone.Name);
+                            SendReply(player, "<color=#55ff55>GANG KIT:</color> Welcome to the gang! You've received your gang outfit and weapon.");
+                        }
+                        else
+                        {
+                            Puts("[DEBUG] GangKits plugin not found!");
+                        }
+                    });
                 }
             }
             else if (info.HomeHood != zone.Type && zone.Type != NeighborhoodType.Neutral)
