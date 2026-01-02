@@ -1178,6 +1178,12 @@ namespace Oxide.Plugins
             return true;
         }
 
+        // API method to check if an entity is a door managed by this plugin
+        private bool API_IsManagedDoor(ulong netId)
+        {
+            return data.Doors.ContainsKey(netId);
+        }
+
         // API method to get door info for HoodWars
         private Dictionary<string, object> API_GetDoorInfo(ulong doorId)
         {

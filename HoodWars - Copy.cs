@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("HoodWars", "Gemini", "7.9.1")]
+    [Info("HoodWars", "Gemini", "7.9.2")]
     [Description("A robust, comprehensive gang-based territory and identity system for a unique vanilla-feel Rust experience.")]
     public class HoodWars : RustPlugin
     {
@@ -457,7 +457,22 @@ namespace Oxide.Plugins
         // Block all damage in HQ safezones
         private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
         {
-            if (_config == null || _config.HQ == null || !_config.HQ.EnableHQSafezones || entity == null) return null;
+            if (_config == null || _config.HQ == null || !_config.HQ.EnableHQSafezones || entity == null || info == null) return null;
+
+            // Let ManualDoor handle its own doors (avoid hook conflict)
+            if (ManualDoor != null && entity.net != null)
+            {
+                var isDoor = ManualDoor.Call<bool>("API_IsManagedDoor", entity.net.ID.Value);
+                if (isDoor)
+                {
+                    // Let ManualDoor handle decay damage on its doors
+                    if (info.damageTypes.Has(Rust.DamageType.Decay))
+                    {
+                        return null;  // Let ManualDoor handle this
+                    }
+                    // For non-decay damage on ManualDoor doors in HQ, still block it
+                }
+            }
 
             // Check if entity is in an HQ safezone
             var hqHood = GetHQAtPosition(entity.transform.position);
@@ -468,12 +483,14 @@ namespace Oxide.Plugins
             {
                 if (_hqToolCupboards.TryGetValue(hqHood.Type, out var tcId) && tc.net?.ID == tcId)
                 {
-                    // HQ TC is indestructible
+                    // HQ TC is indestructible - nullify damage
+                    info.damageTypes.ScaleAll(0f);
                     return true;
                 }
             }
 
-            // Block all damage in HQ safezone
+            // Block all damage in HQ safezone by scaling to 0
+            info.damageTypes.ScaleAll(0f);
             return true;
         }
 
@@ -2314,44 +2331,71 @@ namespace Oxide.Plugins
             Quaternion spawnRot;
 
             // First try a general raycast (similar to ManualDoor) - no layer restriction
+            SendReply(player, "<color=#aaaaaa>DEBUG:</color> Attempting raycast from player eyes...");
             if (Physics.Raycast(player.eyes.HeadRay(), out hit, 10f))
             {
-                spawnPos = hit.point;
+                spawnPos = hit.point + Vector3.up * 0.1f;  // Slightly above hit point to avoid clipping
                 // Rotate to face the player
                 spawnRot = Quaternion.LookRotation((player.transform.position - hit.point).normalized);
                 spawnRot = Quaternion.Euler(0, spawnRot.eulerAngles.y, 0); // Only Y rotation
+                SendReply(player, $"<color=#aaaaaa>DEBUG:</color> Raycast hit: {hit.collider?.name ?? "unknown"} at {spawnPos}");
             }
             else
             {
                 // Spawn at player's feet
                 spawnPos = player.transform.position + (player.transform.forward * 1.5f);
                 spawnRot = Quaternion.Euler(0, player.transform.eulerAngles.y + 180, 0);
+                SendReply(player, $"<color=#aaaaaa>DEBUG:</color> Raycast missed, using player position: {spawnPos}");
             }
 
             // Create the Tool Cupboard
+            SendReply(player, $"<color=#aaaaaa>DEBUG:</color> Creating TC at {spawnPos} with prefab: {PrefabToolCupboard}");
             var tc = GameManager.server.CreateEntity(PrefabToolCupboard, spawnPos, spawnRot) as BuildingPrivlidge;
             if (tc == null)
             {
-                SendReply(player, "<color=#ff4444>ERROR:</color> Failed to create Tool Cupboard entity.");
+                SendReply(player, "<color=#ff4444>ERROR:</color> Failed to create Tool Cupboard entity. Prefab may be invalid.");
                 return;
             }
 
+            SendReply(player, "<color=#aaaaaa>DEBUG:</color> Entity created, setting properties...");
+            
             // Set ownership to 0 (server/admin) so any gang member can authorize
             tc.OwnerID = 0;
             
-            // CRITICAL: Disable GroundWatch to allow spawning on bare ground (no foundation required)
+            // CRITICAL: Disable GroundWatch BEFORE spawn to allow spawning on bare ground
             var gw = tc.GetComponent<GroundWatch>();
-            if (gw != null) gw.enabled = false;
+            if (gw != null) 
+            {
+                gw.enabled = false;
+                UnityEngine.Object.DestroyImmediate(gw);  // Completely remove the component
+            }
+            
+            // CRITICAL: Disable DestroyOnGroundMissing
+            var dgm = tc.GetComponent<DestroyOnGroundMissing>();
+            if (dgm != null)
+            {
+                dgm.enabled = false;
+                UnityEngine.Object.DestroyImmediate(dgm);
+            }
             
             // CRITICAL: Set grounded to true so it doesn't destroy itself without foundations
             var stab = tc.GetComponent<StabilityEntity>();
             if (stab != null) stab.grounded = true;
             
-            // Disable decay so it doesn't decay without a TC (ironic for a TC)
-            var decay = tc.GetComponent<DecayEntity>();
-            if (decay != null) decay.decay = null;
+            // Disable decay
+            if (tc is DecayEntity de)
+                de.decay = null;
             
+            SendReply(player, "<color=#aaaaaa>DEBUG:</color> Calling Spawn()...");
             tc.Spawn();
+            
+            if (tc.IsDestroyed)
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> TC was destroyed immediately after spawn!");
+                return;
+            }
+            
+            SendReply(player, $"<color=#aaaaaa>DEBUG:</color> Spawned! net.ID = {tc.net?.ID.Value ?? 0}");
             
             // Ground the entity to the terrain
             tc.SendNetworkUpdate();
