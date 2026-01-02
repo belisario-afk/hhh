@@ -5,12 +5,19 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("GangKits", "Gemini", "1.5.0")]
+    [Info("GangKits", "Gemini", "1.6.0")]
     [Description("Automatic permanent gang outfits and weapons. Includes admin testing tools.")]
     public class GangKits : RustPlugin
     {
         // Track gang kit weapons dropped on ground (to clean up)
         private HashSet<uint> _droppedKitItems = new HashSet<uint>();
+        
+        // Track which gang each player is blooded into (persists across deaths)
+        private Dictionary<ulong, string> _playerGangs = new Dictionary<ulong, string>();
+        
+        // Track wounded players to prevent kit loss on DBNO (down but not out)
+        private HashSet<ulong> _woundedPlayers = new HashSet<ulong>();
+        
         [PluginReference]
         private Plugin HoodWars;
 
@@ -107,10 +114,34 @@ namespace Oxide.Plugins
 
         #region Core Logic
 
+        // API method to register a player's gang (called when they blood in)
+        private void API_RegisterPlayerGang(ulong playerId, string gangName)
+        {
+            Puts($"[DEBUG] API_RegisterPlayerGang: playerId={playerId}, gangName={gangName}");
+            if (!string.IsNullOrEmpty(gangName) && gangName != "Neutral" && gangName != "Neutral Ground")
+            {
+                _playerGangs[playerId] = gangName;
+                Puts($"[DEBUG] Player {playerId} registered to gang: {gangName}");
+            }
+        }
+        
+        // API method to get a player's registered gang
+        private string API_GetPlayerGang(ulong playerId)
+        {
+            return _playerGangs.ContainsKey(playerId) ? _playerGangs[playerId] : null;
+        }
+
         // API method for external plugins to give a player their gang kit
         private void API_GiveGangKit(BasePlayer player, string gangName = null)
         {
             Puts($"[DEBUG] API_GiveGangKit called for player: {player?.displayName ?? "null"}, gangName: {gangName ?? "null"}");
+            
+            // If gang name provided, also register them
+            if (!string.IsNullOrEmpty(gangName) && gangName != "Neutral" && gangName != "Neutral Ground")
+            {
+                _playerGangs[player.userID] = gangName;
+            }
+            
             GiveGangKit(player, gangName);
         }
 
@@ -243,9 +274,31 @@ namespace Oxide.Plugins
 
         private string GetPlayerGang(BasePlayer player)
         {
-            if (HoodWars == null) return "Neutral";
+            // First check our internal tracking (persistent across deaths/locations)
+            if (_playerGangs.ContainsKey(player.userID))
+            {
+                Puts($"[DEBUG] GetPlayerGang: Found cached gang for {player.displayName}: {_playerGangs[player.userID]}");
+                return _playerGangs[player.userID];
+            }
+            
+            // Fall back to HoodWars for fresh players
+            if (HoodWars == null) 
+            {
+                Puts($"[DEBUG] GetPlayerGang: HoodWars not loaded, returning Neutral");
+                return "Neutral";
+            }
+            
             object result = HoodWars.Call("GetPlayerGangName", player.userID);
-            return result?.ToString() ?? "Neutral";
+            string gangName = result?.ToString() ?? "Neutral";
+            Puts($"[DEBUG] GetPlayerGang: HoodWars returned '{gangName}' for {player.displayName}");
+            
+            // Cache the result if it's a valid gang
+            if (!string.IsNullOrEmpty(gangName) && gangName != "Neutral" && gangName != "Neutral Ground")
+            {
+                _playerGangs[player.userID] = gangName;
+            }
+            
+            return gangName;
         }
 
         #endregion
@@ -320,12 +373,22 @@ namespace Oxide.Plugins
         {
             if (item == null) return;
             
-            // If this is a gang kit item dropped on ground, track it for cleanup
+            // If this is a gang kit item dropped on ground
             if (item.name == "GANG_KIT_ITEM" || item.name == "GANG_KIT_WEAPON")
             {
                 Puts($"[DEBUG] Gang kit item dropped on ground: {item.info.shortname}");
                 
-                // Destroy it immediately - gang kit items can't be dropped
+                // Find who dropped it
+                BasePlayer dropper = item.GetOwnerPlayer();
+                
+                // If player is wounded/DBNO, don't destroy yet - they might recover
+                if (dropper != null && _woundedPlayers.Contains(dropper.userID))
+                {
+                    Puts($"[DEBUG] Player is wounded - keeping dropped kit item for potential recovery");
+                    return;
+                }
+                
+                // Otherwise destroy it - gang kit items can't be dropped while alive
                 timer.Once(0.1f, () => {
                     if (entity != null && !entity.IsDestroyed)
                     {
@@ -364,8 +427,33 @@ namespace Oxide.Plugins
             if (player == null) return;
             Puts($"[DEBUG] OnPlayerDeath: {player.displayName}");
             
+            // Remove from wounded tracking since they're fully dead now
+            _woundedPlayers.Remove(player.userID);
+            
             // Note: Corpse handling is done in OnPlayerCorpseSpawned
             // Respawn kit is handled in OnPlayerRespawned
+        }
+        
+        // Player got downed/wounded (DBNO state) - NOT full death
+        private void OnPlayerWound(BasePlayer player)
+        {
+            if (player == null) return;
+            Puts($"[DEBUG] OnPlayerWound (DBNO): {player.displayName}");
+            _woundedPlayers.Add(player.userID);
+        }
+        
+        // Player recovered from wounded state (got back up)
+        private void OnPlayerRecover(BasePlayer player)
+        {
+            if (player == null) return;
+            Puts($"[DEBUG] OnPlayerRecover: {player.displayName}");
+            _woundedPlayers.Remove(player.userID);
+            
+            // Give kit back since they recovered (weapon may have been dropped while wounded)
+            timer.Once(0.5f, () => {
+                if (player == null || !player.IsConnected) return;
+                GiveGangKit(player); // Only give missing items
+            });
         }
 
         #endregion
