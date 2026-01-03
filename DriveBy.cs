@@ -7,8 +7,8 @@ using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "2.0.2")]
-    [Description("Premium AI drive-bys: Free-roam chase mode with aggressive dismounted combat. NPCs properly fight on ground.")]
+    [Info("DriveBy", "Gemini", "2.0.4")]
+    [Description("Premium AI drive-bys: Smart driving with complex turns, aggressive chase mode, obstacle avoidance, and proper ground combat.")]
     public class DriveBy : RustPlugin
     {
         [PluginReference]
@@ -72,7 +72,7 @@ namespace Oxide.Plugins
                 ["Max Shoot Distance"] = 60f,         // Maximum distance to shoot
                 ["Shoot Interval"] = 0.6f,            // Seconds between each NPC shot (alternating fire)
                 ["Spawn Distance From Border"] = 100f,
-                ["Vehicle Speed"] = 15f,             // Max vehicle speed
+                ["Vehicle Speed"] = 18f,             // Max vehicle speed (aggressive)
                 ["Stuck Recovery Time"] = 2f         // Seconds before attempting stuck recovery
             };
 
@@ -961,97 +961,219 @@ namespace Oxide.Plugins
             var rb = ev.Vehicle.GetComponent<Rigidbody>();
             if (rb == null) return;
             
-            // Try reversing briefly
-            rb.velocity = -ev.Vehicle.transform.forward * 5f;
+            float stuckDuration = ev.StuckTimer > 0 ? Time.realtimeSinceStartup - ev.StuckTimer : 0f;
             
-            // Add some random rotation to unstick
-            rb.AddTorque(Vector3.up * UnityEngine.Random.Range(-200f, 200f), ForceMode.Impulse);
-            
-            // If very stuck, teleport slightly
-            if (ev.StuckTimer > 0 && Time.realtimeSinceStartup - ev.StuckTimer > 4f)
+            // Stage 1 (0-2s): Try reversing with random turn
+            if (stuckDuration < 2f)
             {
-                Vector3 newPos = ev.Vehicle.transform.position + 
-                    new Vector3(UnityEngine.Random.Range(-5f, 5f), 2f, UnityEngine.Random.Range(-5f, 5f));
-                Vector3 groundPos = GetFlatGroundPosition(newPos);
-                if (groundPos != Vector3.zero)
+                rb.velocity = -ev.Vehicle.transform.forward * 8f;
+                rb.AddTorque(Vector3.up * UnityEngine.Random.Range(-400f, 400f), ForceMode.Impulse);
+            }
+            // Stage 2 (2-4s): More aggressive reverse + turn
+            else if (stuckDuration < 4f)
+            {
+                rb.velocity = -ev.Vehicle.transform.forward * 10f;
+                float turnDir = UnityEngine.Random.value > 0.5f ? 1f : -1f;
+                rb.AddTorque(Vector3.up * turnDir * 600f, ForceMode.Impulse);
+            }
+            // Stage 3 (4s+): Teleport to a better position
+            else
+            {
+                // Find direction towards target
+                Vector3 toTarget = (ev.TargetPosition - ev.Vehicle.transform.position).normalized;
+                
+                // Try multiple teleport positions
+                for (int i = 0; i < 5; i++)
                 {
-                    ev.Vehicle.transform.position = groundPos;
-                    Puts($"[DriveBy] Teleported vehicle to {groundPos}");
+                    Vector3 offset = toTarget * 10f + new Vector3(
+                        UnityEngine.Random.Range(-8f, 8f), 
+                        3f, 
+                        UnityEngine.Random.Range(-8f, 8f)
+                    );
+                    Vector3 testPos = ev.Vehicle.transform.position + offset;
+                    Vector3 groundPos = GetFlatGroundPosition(testPos);
+                    
+                    if (groundPos != Vector3.zero && !IsInWater(groundPos) && IsFlatEnough(groundPos))
+                    {
+                        // Face towards target
+                        Vector3 lookDir = (ev.TargetPosition - groundPos);
+                        lookDir.y = 0;
+                        if (lookDir.magnitude > 1f)
+                        {
+                            ev.Vehicle.transform.rotation = Quaternion.LookRotation(lookDir.normalized);
+                        }
+                        
+                        ev.Vehicle.transform.position = groundPos;
+                        rb.velocity = Vector3.zero;
+                        rb.angularVelocity = Vector3.zero;
+                        
+                        Puts($"[DriveBy] Teleported vehicle to {groundPos}");
+                        ev.StuckTimer = 0f; // Reset timer
+                        return;
+                    }
                 }
+                
+                Puts($"[DriveBy] Could not find valid teleport position!");
             }
         }
         
-        private void DriveVehicle(DriveByEvent ev, Vector3 destination, float maxSpeed = 12f)
+        private void DriveVehicle(DriveByEvent ev, Vector3 destination, float maxSpeed = 15f)
         {
             if (ev.Vehicle == null) return;
             
             Vector3 vehiclePos = ev.Vehicle.transform.position;
             Vector3 toTarget = destination - vehiclePos;
             toTarget.y = 0;
+            float distToTarget = toTarget.magnitude;
             
-            if (toTarget.magnitude < 5f) return;
+            if (distToTarget < 3f) return;
             
-            // Calculate steering - improved steering for better turns
+            // Calculate steering - IMPROVED with predictive steering
             Vector3 forward = ev.Vehicle.transform.forward;
             forward.y = 0;
+            forward.Normalize();
+            
+            Vector3 right = ev.Vehicle.transform.right;
+            right.y = 0;
+            right.Normalize();
+            
             float angle = Vector3.SignedAngle(forward, toTarget.normalized, Vector3.up);
             
-            // Calculate throttle and steering
+            var rb = ev.Vehicle.GetComponent<Rigidbody>();
+            float currentSpeed = rb != null ? rb.velocity.magnitude : 0f;
+            
+            // Calculate throttle and steering with more aggressive logic
             float throttle = 1f;
-            float steering = Mathf.Clamp(angle / 30f, -1f, 1f);
+            float steering = 0f;
             bool shouldReverse = false;
             
-            // If facing away from target (more than 120 degrees off), reverse while turning
-            if (Mathf.Abs(angle) > 120f)
+            // IMPROVED STEERING: Non-linear response for better control
+            // Small angles = smooth steering, large angles = aggressive steering
+            float absAngle = Mathf.Abs(angle);
+            
+            if (absAngle > 150f)
             {
-                throttle = -0.6f; // Reverse
+                // Almost backwards - do a quick 3-point turn
+                throttle = -1f; // Full reverse
                 shouldReverse = true;
-                // Invert steering when reversing to turn correctly
+                steering = angle > 0 ? -1f : 1f; // Full lock
+            }
+            else if (absAngle > 100f)
+            {
+                // Very sharp turn needed - reverse and turn
+                throttle = -0.8f;
+                shouldReverse = true;
                 steering = angle > 0 ? -1f : 1f;
             }
-            // For sharp turns (45-120 degrees), slow down and turn hard
-            else if (Mathf.Abs(angle) > 45f)
+            else if (absAngle > 70f)
             {
-                throttle = 0.3f;
-                steering = angle > 0 ? 1f : -1f; // Full lock steering
+                // Sharp turn - slow down significantly, full steering lock
+                throttle = 0.4f;
+                steering = angle > 0 ? 1f : -1f;
             }
-            else if (Mathf.Abs(angle) > 25f)
+            else if (absAngle > 40f)
             {
-                throttle = 0.6f;
+                // Medium turn - moderate speed, strong steering
+                throttle = 0.7f;
+                steering = Mathf.Sign(angle) * 0.9f;
+            }
+            else if (absAngle > 20f)
+            {
+                // Light turn - good speed, proportional steering
+                throttle = 0.9f;
+                steering = angle / 25f;
+            }
+            else
+            {
+                // Nearly aligned - full speed, light corrections
+                throttle = 1f;
+                steering = angle / 40f;
             }
             
-            // Check for obstacles/steep terrain ahead (only if going forward)
-            if (!shouldReverse && ShouldAvoidAhead(vehiclePos, forward))
+            // Speed-based steering adjustment - MORE steering at low speed, LESS at high speed
+            if (!shouldReverse && currentSpeed > 8f)
             {
-                throttle = 0.2f;
-                steering = angle > 0 ? -1f : 1f; // Turn away
+                steering *= 0.7f; // Reduce steering at high speed to prevent oversteer
+            }
+            else if (!shouldReverse && currentSpeed < 3f)
+            {
+                steering *= 1.3f; // More steering at low speed for tighter turns
             }
             
-            // Apply inputs to BasicCar
-            ev.Vehicle.SetFlag(BaseEntity.Flags.Reserved5, true); // Engine always running
+            // OBSTACLE AVOIDANCE - check multiple directions
+            if (!shouldReverse)
+            {
+                // Check front-left and front-right for obstacles
+                bool obstacleAhead = ShouldAvoidAhead(vehiclePos, forward);
+                bool obstacleLeft = ShouldAvoidAhead(vehiclePos, (forward - right * 0.5f).normalized);
+                bool obstacleRight = ShouldAvoidAhead(vehiclePos, (forward + right * 0.5f).normalized);
+                
+                if (obstacleAhead)
+                {
+                    if (obstacleLeft && !obstacleRight)
+                    {
+                        // Go right
+                        steering = 1f;
+                        throttle = 0.5f;
+                    }
+                    else if (obstacleRight && !obstacleLeft)
+                    {
+                        // Go left
+                        steering = -1f;
+                        throttle = 0.5f;
+                    }
+                    else if (!obstacleLeft && !obstacleRight)
+                    {
+                        // Turn towards target direction
+                        steering = angle > 0 ? 0.8f : -0.8f;
+                        throttle = 0.4f;
+                    }
+                    else
+                    {
+                        // Blocked - reverse
+                        throttle = -0.8f;
+                        steering = UnityEngine.Random.value > 0.5f ? 1f : -1f;
+                        shouldReverse = true;
+                    }
+                }
+            }
             
-            // Use physics to control car smoothly
-            var rb = ev.Vehicle.GetComponent<Rigidbody>();
+            // Clamp steering
+            steering = Mathf.Clamp(steering, -1f, 1f);
+            
+            // Apply inputs to BasicCar - engine always on
+            ev.Vehicle.SetFlag(BaseEntity.Flags.Reserved5, true);
+            
             if (rb != null)
             {
-                float currentSpeed = rb.velocity.magnitude;
+                // IMPROVED PHYSICS - more aggressive acceleration
+                float driveForce = shouldReverse ? 2500f : 5000f; // More power!
+                Vector3 force = ev.Vehicle.transform.forward * throttle * driveForce;
+                rb.AddForce(force, ForceMode.Force);
                 
-                // Apply forward/reverse force
-                Vector3 driveForce = ev.Vehicle.transform.forward * throttle * 3500f;
-                rb.AddForce(driveForce, ForceMode.Force);
+                // IMPROVED STEERING TORQUE - speed-sensitive
+                float baseTorque = 1500f;
+                float speedFactor = Mathf.Clamp01(1f - (currentSpeed / 20f)); // More torque at low speed
+                float torque = baseTorque * (0.6f + speedFactor * 0.6f);
+                rb.AddTorque(Vector3.up * steering * torque, ForceMode.Force);
                 
-                // Apply steering torque - stronger for better turning
-                // Use more torque at lower speeds for tighter turns
-                float steeringMultiplier = currentSpeed < 5f ? 1200f : 800f;
-                rb.AddTorque(Vector3.up * steering * steeringMultiplier, ForceMode.Force);
+                // GRIP/DOWNFORCE - prevents flipping, improves traction
+                rb.AddForce(Vector3.down * 500f, ForceMode.Force);
                 
-                // Add slight downforce to prevent flipping
-                rb.AddForce(Vector3.down * 300f, ForceMode.Force);
+                // LATERAL GRIP - reduce sideways sliding for better control
+                Vector3 lateralVelocity = Vector3.Project(rb.velocity, right);
+                rb.AddForce(-lateralVelocity * 1.5f, ForceMode.VelocityChange);
                 
-                // Limit max speed
+                // AGGRESSIVE SPEED - higher max speed
                 if (currentSpeed > maxSpeed)
                 {
                     rb.velocity = rb.velocity.normalized * maxSpeed;
+                }
+                
+                // BOOST when far from target - accelerate harder
+                if (distToTarget > 50f && absAngle < 30f && !shouldReverse)
+                {
+                    rb.AddForce(ev.Vehicle.transform.forward * 2000f, ForceMode.Force);
                 }
             }
         }
@@ -1072,24 +1194,37 @@ namespace Oxide.Plugins
         {
             RaycastHit hit;
             
-            // Check for obstacles
-            if (Physics.Raycast(pos + Vector3.up, forward, out hit, 10f, 
-                LayerMask.GetMask("World", "Construction", "Deployed")))
+            // Check for obstacles at different heights
+            Vector3[] checkHeights = { Vector3.up * 0.5f, Vector3.up * 1.5f, Vector3.up * 2.5f };
+            
+            foreach (var heightOffset in checkHeights)
             {
-                return true;
+                if (Physics.Raycast(pos + heightOffset, forward, out hit, 12f, 
+                    LayerMask.GetMask("World", "Construction", "Deployed", "Tree")))
+                {
+                    return true;
+                }
             }
             
-            // Check terrain steepness ahead
-            Vector3 aheadPos = pos + forward * 8f;
-            aheadPos.y = 500f;
-            if (Physics.Raycast(aheadPos, Vector3.down, out hit, 1000f, LayerMask.GetMask("Terrain")))
+            // Check terrain steepness ahead at multiple distances
+            float[] checkDistances = { 5f, 10f, 15f };
+            
+            foreach (var dist in checkDistances)
             {
-                float angle = Vector3.Angle(hit.normal, Vector3.up);
-                if (angle > 25f) return true; // Too steep
-                
-                // Check for big height difference
-                float heightDiff = Mathf.Abs(hit.point.y - pos.y);
-                if (heightDiff > 3f) return true; // Too much elevation change
+                Vector3 aheadPos = pos + forward * dist;
+                aheadPos.y = 500f;
+                if (Physics.Raycast(aheadPos, Vector3.down, out hit, 1000f, LayerMask.GetMask("Terrain")))
+                {
+                    float angle = Vector3.Angle(hit.normal, Vector3.up);
+                    if (angle > 25f) return true; // Too steep
+                    
+                    // Check for big height difference (cliff/drop)
+                    float heightDiff = Mathf.Abs(hit.point.y - pos.y);
+                    if (heightDiff > 4f) return true;
+                    
+                    // Check if going into water
+                    if (hit.point.y < WaterSystem.OceanLevel + 1f) return true;
+                }
             }
             
             return false;
