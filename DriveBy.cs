@@ -3,10 +3,11 @@ using System.Collections.Generic;
 using System.Linq;
 using Oxide.Core.Plugins;
 using UnityEngine;
+using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "1.4.2")]
+    [Info("DriveBy", "Gemini", "1.4.3")]
     [Description("Smart AI drive-bys with terrain navigation, dismount attacks. Spawns from territory borders.")]
     public class DriveBy : RustPlugin
     {
@@ -291,10 +292,31 @@ namespace Oxide.Plugins
 
         private void SpawnGangNPC(DriveByEvent ev, int seatIndex, bool isDriver)
         {
-            ScientistNPC npc = GameManager.server.CreateEntity(PrefabScientist, ev.Vehicle.transform.position, Quaternion.identity) as ScientistNPC;
+            // Find a valid NavMesh position near the vehicle to spawn the NPC
+            Vector3 spawnPos = ev.Vehicle.transform.position;
+            NavMeshHit navHit;
+            if (NavMesh.SamplePosition(spawnPos, out navHit, 50f, NavMesh.AllAreas))
+            {
+                spawnPos = navHit.position;
+            }
+            else
+            {
+                // Try finding ground position if NavMesh fails
+                spawnPos = GetGroundPosition(ev.Vehicle.transform.position);
+            }
+            
+            ScientistNPC npc = GameManager.server.CreateEntity(PrefabScientist, spawnPos, Quaternion.identity) as ScientistNPC;
             if (npc == null) return;
 
             npc.Spawn();
+            
+            // Disable NavMeshAgent so it doesn't interfere with mounting
+            var navAgent = npc.GetComponent<NavMeshAgent>();
+            if (navAgent != null)
+            {
+                navAgent.enabled = false;
+            }
+            
             npc.inventory.Strip();
 
             if (_gangKits.TryGetValue(ev.GangOwner, out var kit))
@@ -518,7 +540,25 @@ namespace Oxide.Plugins
             {
                 if (npc != null && !npc.IsDestroyed && npc.IsMounted())
                 {
+                    // Get dismount position on NavMesh
+                    Vector3 dismountPos = ev.Vehicle.transform.position + (ev.Vehicle.transform.right * 3f);
+                    NavMeshHit navHit;
+                    if (NavMesh.SamplePosition(dismountPos, out navHit, 10f, NavMesh.AllAreas))
+                    {
+                        dismountPos = navHit.position;
+                    }
+                    
                     npc.DismountObject();
+                    
+                    // Re-enable NavMeshAgent and position on NavMesh
+                    var navAgent = npc.GetComponent<NavMeshAgent>();
+                    if (navAgent != null)
+                    {
+                        npc.transform.position = dismountPos;
+                        navAgent.Warp(dismountPos);
+                        navAgent.enabled = true;
+                    }
+                    
                     npc.Brain.SetEnabled(true);
                     
                     // Set combat target
@@ -538,6 +578,13 @@ namespace Oxide.Plugins
             {
                 if (npc != null && !npc.IsDestroyed && !npc.IsMounted())
                 {
+                    // Disable NavMeshAgent before mounting
+                    var navAgent = npc.GetComponent<NavMeshAgent>();
+                    if (navAgent != null)
+                    {
+                        navAgent.enabled = false;
+                    }
+                    
                     // Teleport to vehicle first
                     npc.transform.position = ev.Vehicle.transform.position;
                     
