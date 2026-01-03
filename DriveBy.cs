@@ -532,18 +532,23 @@ namespace Oxide.Plugins
             mountPoint.mountable.MountPlayer(npc);
             
             // Configure AI - all NPCs should be able to attack, but driver focuses on "driving"
-            npc.Brain.SetEnabled(true);
+            if (npc.Brain != null)
+            {
+                npc.Brain.SetEnabled(true);
+            }
             
-            // Set hostility so NPCs will attack
-            npc.SetFact(BaseNpc.Facts.IsAggro, 1);
-            npc.SetFact(BaseNpc.Facts.HasEnemy, 1);
-            npc.SetFact(BaseNpc.Facts.EnemyRange, 0); // Close range
+            // Set hostility so NPCs will attack - use ScientistNPC specific methods
+            npc.SetPlayerFlag(BasePlayer.PlayerFlags.Relaxed, false);
             
             BasePlayer target = BasePlayer.FindByID(ev.TargetID);
             if (target != null)
             {
-                npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
+                // Set the target enemy for this NPC
                 npc.SetTarget(target);
+                if (npc.Brain?.Senses?.Memory != null)
+                {
+                    npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
+                }
             }
 
             ev.Shooters.Add(npc);
