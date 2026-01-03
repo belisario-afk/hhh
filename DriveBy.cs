@@ -7,8 +7,8 @@ using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "2.0.6")]
-    [Description("Premium AI drive-bys: Continuous steering, escape despawn, and destroys natural obstacles.")]
+    [Info("DriveBy", "Gemini", "2.0.7")]
+    [Description("Premium AI drive-bys: Aggressive forward+steering, escape despawn, and destroys natural obstacles.")]
     public class DriveBy : RustPlugin
     {
         [PluginReference]
@@ -311,23 +311,53 @@ namespace Oxide.Plugins
                         ev.VehicleDestroyed = true;
                         Vector3 carPos = ev.Vehicle.transform.position;
                         
-                        // Kill vehicle first
-                        ev.Vehicle.Kill();
+                        // Remove vehicle from tracking
+                        if (ev.Vehicle.net != null)
+                        {
+                            _driveByVehicles.Remove(ev.Vehicle.net.ID.Value);
+                        }
                         
-                        // Dismount any NPCs still in the car and place them on ground
+                        // Dismount all NPCs FIRST before killing vehicle
                         foreach (var shooter in ev.Shooters)
                         {
-                            if (shooter != null && !shooter.IsDestroyed)
+                            try
                             {
-                                if (shooter.IsMounted())
+                                if (shooter != null && !shooter.IsDestroyed && shooter.IsMounted())
                                 {
                                     shooter.DismountObject();
                                 }
-                                
-                                // Teleport to valid ground position immediately
-                                PlaceNPCOnGround(shooter, carPos, ev);
+                            }
+                            catch (Exception ex)
+                            {
+                                Puts($"[DriveBy] Error dismounting NPC: {ex.Message}");
                             }
                         }
+                        
+                        // Small delay then kill vehicle and place NPCs
+                        timer.Once(0.1f, () => {
+                            try
+                            {
+                                if (ev.Vehicle != null && !ev.Vehicle.IsDestroyed)
+                                {
+                                    ev.Vehicle.Kill();
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Puts($"[DriveBy] Error killing vehicle on NPC death: {ex.Message}");
+                            }
+                            
+                            ev.Vehicle = null;
+                            
+                            // Place remaining NPCs on ground
+                            foreach (var shooter in ev.Shooters)
+                            {
+                                if (shooter != null && !shooter.IsDestroyed)
+                                {
+                                    PlaceNPCOnGround(shooter, carPos, ev);
+                                }
+                            }
+                        });
                     }
                     break;
                 }
@@ -1368,48 +1398,60 @@ namespace Oxide.Plugins
             else
             {
                 // Normal driving - no water concerns
+                // AGGRESSIVE DRIVING MODE - Forward + continuous full steering
                 float absAngle = Mathf.Abs(angle);
                 
-                // CONTINUOUS STEERING - Keep turning until facing the player
-                // Steering is HELD at full lock while angle is significant
+                // MULTI-DIRECTION COMPLEX TURNS
+                // Drive FORWARD while holding steering - like a real aggressive driver
                 
-                // Only reverse when TRULY facing the wrong way (170+ degrees)
-                if (absAngle > 170f)
+                if (absAngle > 150f)
                 {
-                    // Almost completely backwards - do a 3-point turn
-                    throttle = -0.8f;
-                    shouldReverse = true;
-                    steering = angle > 0 ? -1f : 1f;  // Full lock while reversing
+                    // Almost backwards - aggressive forward-turn maneuver
+                    // DON'T REVERSE - power through with FULL LOCK steering
+                    throttle = 0.7f;  // Forward with power
+                    steering = angle > 0 ? 1f : -1f;  // FULL LOCK HELD
+                }
+                else if (absAngle > 120f)
+                {
+                    // Very wrong direction - aggressive forward+turn combo
+                    throttle = 0.8f;  // Good forward power
+                    steering = angle > 0 ? 1f : -1f;  // FULL LOCK HELD continuously
                 }
                 else if (absAngle > 90f)
                 {
-                    // Very wrong direction - FULL LOCK turn until facing target
-                    throttle = 0.35f;  // Slow forward
-                    steering = angle > 0 ? 1f : -1f;  // FULL LOCK - held continuously
+                    // Need big turn - full lock with forward power
+                    throttle = 0.85f;
+                    steering = angle > 0 ? 1f : -1f;  // FULL LOCK
                 }
                 else if (absAngle > 60f)
                 {
-                    // Still need significant turn - keep full lock
-                    throttle = 0.5f;
+                    // Significant turn - full lock with good throttle
+                    throttle = 0.9f;
                     steering = angle > 0 ? 1f : -1f;  // FULL LOCK
                 }
                 else if (absAngle > 40f)
                 {
-                    // Moderate turn needed - strong steering
-                    throttle = 0.7f;
-                    steering = angle > 0 ? 0.95f : -0.95f;  // Strong steering
+                    // Moderate turn - strong steering with throttle
+                    throttle = 1f;
+                    steering = angle > 0 ? 0.95f : -0.95f;  // Near full lock
                 }
                 else if (absAngle > 20f)
                 {
-                    // Small correction
-                    throttle = 0.9f;
-                    steering = angle / 22f;  // Proportional steering
+                    // Small correction with full throttle
+                    throttle = 1f;
+                    steering = angle > 0 ? 0.7f : -0.7f;  // Strong steering
+                }
+                else if (absAngle > 10f)
+                {
+                    // Minor adjustment with full speed
+                    throttle = 1f;
+                    steering = angle / 15f;  // Proportional steering
                 }
                 else
                 {
-                    // Nearly aligned - minor adjustments
+                    // Nearly aligned - minor adjustments at full speed
                     throttle = 1f;
-                    steering = angle / 45f;
+                    steering = angle / 30f;
                 }
             }
             
@@ -1419,14 +1461,11 @@ namespace Oxide.Plugins
                 throttle = Mathf.Max(throttle, 0.8f);
             }
             
-            // Speed-based steering adjustment
-            if (!shouldReverse && currentSpeed > 10f)
+            // AGGRESSIVE STEERING - NO reduction at high speed for maximum turning capability
+            // Only boost at low speed for tighter turns
+            if (!shouldReverse && currentSpeed < 5f)
             {
-                steering *= 0.6f;
-            }
-            else if (!shouldReverse && currentSpeed < 4f)
-            {
-                steering *= 1.2f;
+                steering *= 1.3f;  // Extra steering at low speed
             }
             
             // OBSTACLE AVOIDANCE - but NOT if we're avoiding water (water takes priority)
@@ -1441,23 +1480,23 @@ namespace Oxide.Plugins
                     if (obstacleLeft && !obstacleRight)
                     {
                         steering = 0.9f;
-                        throttle = 0.5f;
+                        throttle = 0.6f;  // Keep good power
                     }
                     else if (obstacleRight && !obstacleLeft)
                     {
                         steering = -0.9f;
-                        throttle = 0.5f;
+                        throttle = 0.6f;  // Keep good power
                     }
                     else if (!obstacleLeft && !obstacleRight)
                     {
-                        steering = angle > 0 ? 0.7f : -0.7f;
-                        throttle = 0.5f;
+                        steering = angle > 0 ? 0.9f : -0.9f;
+                        throttle = 0.6f;
                     }
                     else if (!waterBehind)
                     {
                         // Only reverse if no water behind
-                        throttle = -0.6f;
-                        steering = UnityEngine.Random.value > 0.5f ? 0.7f : -0.7f;
+                        throttle = -0.7f;
+                        steering = UnityEngine.Random.value > 0.5f ? 0.9f : -0.9f;
                         shouldReverse = true;
                     }
                 }
@@ -1471,31 +1510,42 @@ namespace Oxide.Plugins
             
             if (rb != null)
             {
-                // IMPROVED PHYSICS - better hill climbing
-                float baseDriveForce = shouldReverse ? 2500f : 5500f;
+                // AGGRESSIVE PHYSICS - high power for fast turns
+                float baseDriveForce = shouldReverse ? 3000f : 6000f;
                 
                 // Extra power for hills
                 if (goingUphill && groundSlope > 5f)
                 {
-                    baseDriveForce += groundSlope * 100f;
+                    baseDriveForce += groundSlope * 150f;
                 }
                 
                 Vector3 force = ev.Vehicle.transform.forward * throttle * baseDriveForce;
                 rb.AddForce(force, ForceMode.Force);
                 
-                // IMPROVED STEERING TORQUE - smoother, speed-sensitive
-                float baseTorque = 1200f;
-                float speedFactor = Mathf.Clamp01(1f - (currentSpeed / 25f));
-                float torque = baseTorque * (0.5f + speedFactor * 0.7f);
+                // AGGRESSIVE STEERING TORQUE - high torque at all speeds
+                float baseTorque = 1800f;  // Increased from 1200
+                // Less speed reduction - keep steering powerful at higher speeds
+                float speedFactor = Mathf.Clamp01(1f - (currentSpeed / 35f));  // Less reduction
+                float torque = baseTorque * (0.7f + speedFactor * 0.5f);  // Minimum 70% torque
                 rb.AddTorque(Vector3.up * steering * torque, ForceMode.Force);
                 
+                // EXTRA ROTATION FORCE when angle is significant
+                float absAngle = Mathf.Abs(angle);
+                if (absAngle > 45f && Mathf.Abs(steering) > 0.8f)
+                {
+                    // Apply extra rotation torque to force the turn
+                    float extraTorque = (absAngle / 180f) * 800f;
+                    rb.AddTorque(Vector3.up * steering * extraTorque, ForceMode.Force);
+                }
+                
                 // GRIP/DOWNFORCE
-                float downforce = 400f + (goingUphill ? groundSlope * 20f : 0f);
+                float downforce = 500f + (goingUphill ? groundSlope * 25f : 0f);
                 rb.AddForce(Vector3.down * downforce, ForceMode.Force);
                 
-                // LATERAL GRIP - reduce sideways sliding
+                // LATERAL GRIP - reduce sideways sliding but allow some drift for turns
                 Vector3 lateralVelocity = Vector3.Project(rb.velocity, right);
-                rb.AddForce(-lateralVelocity * 1.2f, ForceMode.VelocityChange);
+                float gripStrength = absAngle > 60f ? 0.8f : 1.2f;  // Less grip during big turns
+                rb.AddForce(-lateralVelocity * gripStrength, ForceMode.VelocityChange);
                 
                 // Speed limiting
                 if (currentSpeed > maxSpeed)
@@ -1717,7 +1767,7 @@ namespace Oxide.Plugins
         {
             if (ev == null) return;
             
-            // Remove vehicle tracking
+            // Remove vehicle tracking first
             if (ev.Vehicle != null && ev.Vehicle.net != null)
             {
                 _driveByVehicles.Remove(ev.Vehicle.net.ID.Value);
@@ -1732,16 +1782,63 @@ namespace Oxide.Plugins
                 }
             }
             
+            // Kill NPCs first (before killing vehicle to avoid issues)
             if (killAll)
             {
                 foreach (var npc in ev.Shooters)
                 {
-                    if (npc != null && !npc.IsDestroyed) npc.Kill();
+                    try
+                    {
+                        if (npc != null && !npc.IsDestroyed)
+                        {
+                            // Dismount first if mounted
+                            if (npc.IsMounted())
+                            {
+                                npc.DismountObject();
+                            }
+                            npc.Kill();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Puts($"[DriveBy] Error killing NPC: {ex.Message}");
+                    }
                 }
             }
             
-            if (ev.Vehicle != null && !ev.Vehicle.IsDestroyed) 
-                ev.Vehicle.Kill();
+            // Now kill the vehicle
+            try
+            {
+                if (ev.Vehicle != null && !ev.Vehicle.IsDestroyed)
+                {
+                    // Dismount any remaining occupants
+                    if (ev.Vehicle.mountPoints != null)
+                    {
+                        foreach (var mp in ev.Vehicle.mountPoints)
+                        {
+                            if (mp?.mountable != null)
+                            {
+                                var mounted = mp.mountable.GetMounted();
+                                if (mounted != null)
+                                {
+                                    mounted.DismountObject();
+                                }
+                            }
+                        }
+                    }
+                    
+                    ev.Vehicle.Kill();
+                }
+            }
+            catch (Exception ex)
+            {
+                Puts($"[DriveBy] Error killing vehicle: {ex.Message}");
+            }
+            
+            // Clear the shooter list
+            ev.Shooters.Clear();
+            ev.Vehicle = null;
+            ev.VehicleDestroyed = true;
         }
 
         #endregion
