@@ -7,8 +7,8 @@ using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "2.0.0")]
-    [Description("Premium AI drive-bys: Free-roam chase mode - car constantly follows and chases player. Improved steering and alternating fire.")]
+    [Info("DriveBy", "Gemini", "2.0.2")]
+    [Description("Premium AI drive-bys: Free-roam chase mode with aggressive dismounted combat. NPCs properly fight on ground.")]
     public class DriveBy : RustPlugin
     {
         [PluginReference]
@@ -197,20 +197,63 @@ namespace Oxide.Plugins
                     if (ev.Vehicle != null && !ev.Vehicle.IsDestroyed && !ev.VehicleDestroyed)
                     {
                         ev.VehicleDestroyed = true;
-                        // Dismount any NPCs still in the car
+                        Vector3 carPos = ev.Vehicle.transform.position;
+                        
+                        // Kill vehicle first
+                        ev.Vehicle.Kill();
+                        
+                        // Dismount any NPCs still in the car and place them on ground
                         foreach (var shooter in ev.Shooters)
                         {
-                            if (shooter != null && !shooter.IsDestroyed && shooter.IsMounted())
+                            if (shooter != null && !shooter.IsDestroyed)
                             {
-                                shooter.DismountObject();
-                                EnableNPCCombat(shooter, ev);
+                                if (shooter.IsMounted())
+                                {
+                                    shooter.DismountObject();
+                                }
+                                
+                                // Teleport to valid ground position immediately
+                                PlaceNPCOnGround(shooter, carPos, ev);
                             }
                         }
-                        ev.Vehicle.Kill();
                     }
                     break;
                 }
             }
+        }
+        
+        private void PlaceNPCOnGround(ScientistNPC npc, Vector3 nearPos, DriveByEvent ev)
+        {
+            if (npc == null || npc.IsDestroyed) return;
+            
+            // Find a valid ground position on NavMesh
+            NavMeshHit navHit;
+            Vector3 groundPos = nearPos;
+            
+            // Try to find a NavMesh position nearby
+            if (NavMesh.SamplePosition(nearPos, out navHit, 15f, NavMesh.AllAreas))
+            {
+                groundPos = navHit.position;
+            }
+            else
+            {
+                // Fallback: raycast to find ground
+                RaycastHit hit;
+                Vector3 above = nearPos + Vector3.up * 10f;
+                if (Physics.Raycast(above, Vector3.down, out hit, 50f, LayerMask.GetMask("Terrain", "World")))
+                {
+                    groundPos = hit.point + Vector3.up * 0.1f;
+                }
+            }
+            
+            // Move NPC to ground position
+            npc.transform.position = groundPos;
+            
+            // Small delay then enable combat AI
+            timer.Once(0.3f, () => {
+                if (npc != null && !npc.IsDestroyed)
+                    EnableNPCCombat(npc, ev);
+            });
         }
 
         private void CheckForIntruders()
@@ -598,12 +641,19 @@ namespace Oxide.Plugins
         {
             if (npc == null || npc.IsDestroyed) return;
             
+            Puts($"[DriveBy] Enabling combat for NPC {npc.net?.ID}");
+            
             // Find valid NavMesh position
             NavMeshHit navHit;
             Vector3 pos = npc.transform.position;
             if (NavMesh.SamplePosition(pos, out navHit, 20f, NavMesh.AllAreas))
             {
                 npc.transform.position = navHit.position;
+                Puts($"[DriveBy] Moved NPC to NavMesh at {navHit.position}");
+            }
+            else
+            {
+                Puts($"[DriveBy] WARNING: No NavMesh found near {pos}");
             }
             
             // Enable NavMesh for proper movement
@@ -612,8 +662,10 @@ namespace Oxide.Plugins
             {
                 navAgent.enabled = true;
                 navAgent.Warp(npc.transform.position);
-                navAgent.stoppingDistance = 2f;  // Get close to target
-                navAgent.speed = 5f;  // Run speed
+                navAgent.stoppingDistance = 3f;  // Stop 3m from target to shoot
+                navAgent.speed = 5.5f;  // Run speed
+                navAgent.acceleration = 8f;  // Quick acceleration
+                navAgent.angularSpeed = 180f;  // Fast turning
             }
             
             // Enable brain for AI behavior
@@ -621,17 +673,26 @@ namespace Oxide.Plugins
             {
                 npc.Brain.SetEnabled(true);
                 
-                // Set aggressive state
-                npc.Brain.Navigator.SetDestination(ev.TargetPosition, BaseNavigator.NavigationSpeed.Fast);
+                // Make sure senses are working
+                if (npc.Brain.Senses != null)
+                {
+                    npc.Brain.Senses.Init();
+                }
             }
             
-            // Make NPC aggressive
+            // Configure NPC for combat
             npc.SetPlayerFlag(BasePlayer.PlayerFlags.Relaxed, false);
             
-            // Set target in memory
+            // Set attack range on NPC
+            npc.damageScale = 1f;
+            
+            // Get target
             BasePlayer target = BasePlayer.FindByID(ev.TargetID);
             if (target != null && target.IsAlive())
             {
+                Puts($"[DriveBy] Setting target to {target.displayName}");
+                
+                // Set target in memory
                 if (npc.Brain?.Senses?.Memory != null)
                 {
                     npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
@@ -649,6 +710,64 @@ namespace Oxide.Plugins
                     npc.Brain.Navigator.SetDestination(target.transform.position, BaseNavigator.NavigationSpeed.Fast);
                 }
             }
+            
+            // Start periodic combat update for this NPC
+            StartCombatBehavior(npc, ev);
+        }
+        
+        private void StartCombatBehavior(ScientistNPC npc, DriveByEvent ev)
+        {
+            // Update NPC combat every 0.5 seconds until dead or event ends
+            timer.Repeat(0.5f, 0, () =>
+            {
+                if (npc == null || npc.IsDestroyed || ev.Shooters == null || !ev.Shooters.Contains(npc))
+                    return;
+                
+                // Only update if dismounted
+                if (npc.IsMounted()) return;
+                
+                BasePlayer target = BasePlayer.FindByID(ev.TargetID);
+                if (target == null || !target.IsAlive()) return;
+                
+                float distToTarget = Vector3.Distance(npc.transform.position, target.transform.position);
+                
+                // Update destination to chase target
+                if (npc.Brain?.Navigator != null)
+                {
+                    npc.Brain.Navigator.SetDestination(target.transform.position, BaseNavigator.NavigationSpeed.Fast);
+                }
+                
+                // If close enough, try to attack
+                if (distToTarget < 30f)
+                {
+                    // Face the target
+                    Vector3 lookDir = (target.transform.position - npc.transform.position).normalized;
+                    npc.SetAimDirection(lookDir);
+                    
+                    // Try to shoot
+                    var heldEntity = npc.GetHeldEntity() as BaseProjectile;
+                    if (heldEntity != null)
+                    {
+                        // Check line of sight
+                        Vector3 npcEyes = npc.eyes?.position ?? (npc.transform.position + Vector3.up * 1.5f);
+                        Vector3 targetPos = target.transform.position + Vector3.up * 1f;
+                        
+                        if (!Physics.Linecast(npcEyes, targetPos, LayerMask.GetMask("World", "Construction")))
+                        {
+                            if (heldEntity.primaryMagazine.contents > 0)
+                            {
+                                npc.SignalBroadcast(BaseEntity.Signal.Attack, string.Empty);
+                                heldEntity.ServerUse();
+                            }
+                            else
+                            {
+                                // Reload
+                                heldEntity.primaryMagazine.contents = heldEntity.primaryMagazine.capacity;
+                            }
+                        }
+                    }
+                }
+            });
         }
 
         private void UpdateActiveDriveBys()
@@ -984,17 +1103,17 @@ namespace Oxide.Plugins
         
         private void DismountShooters(DriveByEvent ev)
         {
+            if (ev.Vehicle == null || ev.Vehicle.IsDestroyed) return;
+            Vector3 carPos = ev.Vehicle.transform.position;
+            
             foreach (var npc in ev.Shooters)
             {
                 if (npc != null && !npc.IsDestroyed && npc.IsMounted())
                 {
                     npc.DismountObject();
                     
-                    // Small delay then enable combat
-                    timer.Once(0.5f, () => {
-                        if (npc != null && !npc.IsDestroyed)
-                            EnableNPCCombat(npc, ev);
-                    });
+                    // Use PlaceNPCOnGround to properly position and enable combat
+                    PlaceNPCOnGround(npc, carPos, ev);
                 }
             }
         }
