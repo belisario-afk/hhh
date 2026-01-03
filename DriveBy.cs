@@ -7,7 +7,7 @@ using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "1.6.1")]
+    [Info("DriveBy", "Gemini", "1.6.2")]
     [Description("Premium AI drive-bys: drive-by shooting pass, U-turn, return, then dismount attack.")]
     public class DriveBy : RustPlugin
     {
@@ -307,43 +307,71 @@ namespace Oxide.Plugins
                 direction = borderConfig[gang].ToString().ToLower();
             
             float worldSize = TerrainMeta.Size.x / 2f;
-            Vector3 basePos = targetPos;
             
-            // Start from border direction
-            switch (direction)
+            // Start closer to target and search outward for valid spawn
+            for (float distFromTarget = 150f; distFromTarget <= 400f; distFromTarget += 50f)
             {
-                case "west":
-                    basePos = new Vector3(-worldSize + spawnDist, 0, targetPos.z);
-                    break;
-                case "east":
-                    basePos = new Vector3(worldSize - spawnDist, 0, targetPos.z);
-                    break;
-                case "north":
-                    basePos = new Vector3(targetPos.x, 0, worldSize - spawnDist);
-                    break;
-                case "south":
-                    basePos = new Vector3(targetPos.x, 0, -worldSize + spawnDist);
-                    break;
+                Vector3 basePos;
+                switch (direction)
+                {
+                    case "west":
+                        basePos = new Vector3(targetPos.x - distFromTarget, 0, targetPos.z);
+                        break;
+                    case "east":
+                        basePos = new Vector3(targetPos.x + distFromTarget, 0, targetPos.z);
+                        break;
+                    case "north":
+                        basePos = new Vector3(targetPos.x, 0, targetPos.z + distFromTarget);
+                        break;
+                    case "south":
+                        basePos = new Vector3(targetPos.x, 0, targetPos.z - distFromTarget);
+                        break;
+                    default:
+                        basePos = new Vector3(targetPos.x - distFromTarget, 0, targetPos.z);
+                        break;
+                }
+                
+                // Clamp to world bounds
+                basePos.x = Mathf.Clamp(basePos.x, -worldSize + 50f, worldSize - 50f);
+                basePos.z = Mathf.Clamp(basePos.z, -worldSize + 50f, worldSize - 50f);
+                
+                // Search for a good spawn point nearby
+                for (int i = 0; i < 15; i++)
+                {
+                    Vector3 testPos = basePos + new Vector3(
+                        UnityEngine.Random.Range(-30f, 30f), 
+                        0, 
+                        UnityEngine.Random.Range(-30f, 30f)
+                    );
+                    
+                    testPos = GetFlatGroundPosition(testPos);
+                    if (testPos != Vector3.zero && !IsInWater(testPos) && IsFlatEnough(testPos))
+                    {
+                        Puts($"[DriveBy] Found valid spawn at dist {distFromTarget}: {testPos}");
+                        return testPos;
+                    }
+                }
             }
             
-            // Find flat ground - search for a good spawn point
-            for (int i = 0; i < 10; i++)
+            // Last resort: spawn near the target itself
+            for (int i = 0; i < 20; i++)
             {
-                Vector3 testPos = basePos + new Vector3(
-                    UnityEngine.Random.Range(-20f, 20f), 
+                Vector3 testPos = targetPos + new Vector3(
+                    UnityEngine.Random.Range(-100f, 100f), 
                     0, 
-                    UnityEngine.Random.Range(-20f, 20f)
+                    UnityEngine.Random.Range(-100f, 100f)
                 );
                 
                 testPos = GetFlatGroundPosition(testPos);
                 if (testPos != Vector3.zero && !IsInWater(testPos) && IsFlatEnough(testPos))
                 {
+                    Puts($"[DriveBy] Found fallback spawn near target: {testPos}");
                     return testPos;
                 }
             }
             
-            // Fallback to simple ground position
-            return GetFlatGroundPosition(basePos);
+            Puts($"[DriveBy] ERROR: Could not find any valid spawn position!");
+            return Vector3.zero;
         }
         
         private Vector3 GetFlatGroundPosition(Vector3 pos)
@@ -352,7 +380,17 @@ namespace Oxide.Plugins
             pos.y = 500f;
             if (Physics.Raycast(pos, Vector3.down, out hit, 1000f, LayerMask.GetMask("Terrain", "World")))
             {
-                return hit.point + Vector3.up * 0.5f;
+                Vector3 groundPos = hit.point + Vector3.up * 0.5f;
+                
+                // Make sure position is above water level
+                float waterLevel = WaterSystem.OceanLevel;
+                if (groundPos.y < waterLevel + 1f)
+                {
+                    Puts($"[DriveBy] Ground position {groundPos.y} is below water level {waterLevel}, skipping");
+                    return Vector3.zero;
+                }
+                
+                return groundPos;
             }
             return Vector3.zero;
         }
