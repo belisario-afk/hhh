@@ -7,8 +7,8 @@ using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "1.5.0")]
-    [Description("Premium AI drive-bys with proper vehicle physics, dismount attacks, terrain awareness.")]
+    [Info("DriveBy", "Gemini", "1.6.0")]
+    [Description("Premium AI drive-bys: drive-by shooting pass, U-turn, return, then dismount attack.")]
     public class DriveBy : RustPlugin
     {
         [PluginReference]
@@ -16,11 +16,13 @@ namespace Oxide.Plugins
 
         private enum DriveByPhase
         {
-            DrivingToTarget,    // Car driving towards target
-            Stopped,             // Car stopped, NPCs getting out
+            FirstPass,           // Initial drive-by shooting pass
+            UTurn,               // Doing U-turn
+            ReturnPass,          // Coming back towards target
+            StoppingToDisembark, // Slowing down near target
             Dismounted,          // NPCs on foot shooting
             Remounting,          // NPCs getting back in car
-            DrivingAway          // Car driving away
+            DrivingAway          // Car driving away to exit
         }
 
         private class DriveByEvent
@@ -28,12 +30,15 @@ namespace Oxide.Plugins
             public BasicCar Vehicle;
             public List<ScientistNPC> Shooters = new List<ScientistNPC>();
             public Vector3 TargetPosition;
+            public Vector3 SpawnPosition;       // Where car started (for U-turn)
             public Vector3 ExitPosition;
+            public Vector3 UTurnPoint;          // Point past target for U-turn
             public ulong TargetID;
             public string GangOwner;
-            public DriveByPhase Phase = DriveByPhase.DrivingToTarget;
+            public DriveByPhase Phase = DriveByPhase.FirstPass;
             public float PhaseTimer;
             public bool VehicleDestroyed = false;
+            public bool FirstPassComplete = false;
         }
 
         private List<DriveByEvent> _activeEvents = new List<DriveByEvent>();
@@ -61,9 +66,11 @@ namespace Oxide.Plugins
             {
                 ["Detection Interval (Seconds)"] = 30,
                 ["Cooldown per Player (Minutes)"] = 10,
-                ["Dismount Distance"] = 30f,
+                ["Drive-By Pass Distance"] = 80f,    // How far past target before U-turn
+                ["Dismount Distance"] = 15f,         // How close to stop for dismount
                 ["Shoot Duration (Seconds)"] = 10f,
-                ["Spawn Distance From Border"] = 100f
+                ["Spawn Distance From Border"] = 100f,
+                ["Vehicle Speed"] = 12f              // Max vehicle speed
             };
 
             Config["Visuals"] = new Dictionary<string, object>
@@ -217,27 +224,44 @@ namespace Oxide.Plugins
 
             vehicle.Spawn();
             
-            DriveByEvent ev = new DriveByEvent
-            {
-                Vehicle = vehicle,
-                TargetPosition = target.transform.position,
-                ExitPosition = exitPos,
-                TargetID = target.userID,
-                GangOwner = territoryGang,
-                Phase = DriveByPhase.DrivingToTarget,
-                PhaseTimer = Time.realtimeSinceStartup
-            };
+            // Wait a frame for vehicle to fully initialize
+            NextTick(() => {
+                if (vehicle == null || vehicle.IsDestroyed) return;
+                
+                // Calculate U-turn point (past target)
+                var settings = Config["Settings"] as Dictionary<string, object>;
+                float passDistance = settings != null && settings.ContainsKey("Drive-By Pass Distance") 
+                    ? Convert.ToSingle(settings["Drive-By Pass Distance"]) : 80f;
+                
+                Vector3 dirToTarget = (target.transform.position - spawnPos).normalized;
+                Vector3 uTurnPoint = target.transform.position + dirToTarget * passDistance;
+                uTurnPoint = GetFlatGroundPosition(uTurnPoint);
+                if (uTurnPoint == Vector3.zero) uTurnPoint = target.transform.position + dirToTarget * passDistance;
+                
+                DriveByEvent ev = new DriveByEvent
+                {
+                    Vehicle = vehicle,
+                    TargetPosition = target.transform.position,
+                    SpawnPosition = spawnPos,
+                    UTurnPoint = uTurnPoint,
+                    ExitPosition = exitPos,
+                    TargetID = target.userID,
+                    GangOwner = territoryGang,
+                    Phase = DriveByPhase.FirstPass,
+                    PhaseTimer = Time.realtimeSinceStartup
+                };
 
-            // Spawn 3 NPCs properly seated in vehicle
-            // Seat 0 = Driver, Seat 1 = Front passenger, Seat 2 = Rear
-            SpawnSeatedNPC(ev, 0, true);   // Driver
-            SpawnSeatedNPC(ev, 1, false);  // Shooter 1
-            SpawnSeatedNPC(ev, 2, false);  // Shooter 2
+                // Spawn 3 NPCs and mount them properly
+                // We need to mount them AFTER vehicle is ready
+                SpawnAndMountNPC(ev, vehicle, 0, true);   // Driver
+                SpawnAndMountNPC(ev, vehicle, 1, false);  // Shooter 1
+                SpawnAndMountNPC(ev, vehicle, 2, false);  // Shooter 2
 
-            _activeEvents.Add(ev);
-            SetCooldown(target.userID);
-            
-            PrintToChat($"<color=#ff4444>[STREET NEWS]</color> Drive-by in progress in {territoryGang} territory!");
+                _activeEvents.Add(ev);
+                SetCooldown(target.userID);
+                
+                PrintToChat($"<color=#ff4444>[STREET NEWS]</color> Drive-by in progress in {territoryGang} territory!");
+            });
         }
         
         private Vector3 GetRoadSpawnPosition(string gang, Vector3 targetPos)
@@ -343,14 +367,18 @@ namespace Oxide.Plugins
             return targetPos + Vector3.forward * 200f;
         }
 
-        private void SpawnSeatedNPC(DriveByEvent ev, int seatIndex, bool isDriver)
+        private void SpawnAndMountNPC(DriveByEvent ev, BasicCar vehicle, int seatIndex, bool isDriver)
         {
-            // Spawn NPC near vehicle first
-            Vector3 spawnPos = ev.Vehicle.transform.position + ev.Vehicle.transform.right * 2f;
-            spawnPos = GetFlatGroundPosition(spawnPos);
-            if (spawnPos == Vector3.zero) spawnPos = ev.Vehicle.transform.position;
+            if (vehicle == null || vehicle.IsDestroyed) return;
+            if (vehicle.mountPoints == null || seatIndex >= vehicle.mountPoints.Count) return;
             
-            ScientistNPC npc = GameManager.server.CreateEntity(PrefabScientist, spawnPos, Quaternion.identity) as ScientistNPC;
+            var mountPoint = vehicle.mountPoints[seatIndex];
+            if (mountPoint?.mountable == null) return;
+            
+            // Spawn NPC directly at the mount point position
+            Vector3 mountPos = mountPoint.mountable.transform.position;
+            
+            ScientistNPC npc = GameManager.server.CreateEntity(PrefabScientist, mountPos, vehicle.transform.rotation) as ScientistNPC;
             if (npc == null) return;
 
             npc.Spawn();
@@ -370,19 +398,14 @@ namespace Oxide.Plugins
                 npc.UpdateActiveItem(weapon.uid);
             }
 
-            // Mount NPC to vehicle seat
-            if (ev.Vehicle.mountPoints != null && seatIndex < ev.Vehicle.mountPoints.Count)
-            {
-                var mountPoint = ev.Vehicle.mountPoints[seatIndex];
-                if (mountPoint?.mountable != null)
-                {
-                    // Teleport to mount position first
-                    npc.transform.position = mountPoint.mountable.transform.position;
-                    mountPoint.mountable.MountPlayer(npc);
-                }
-            }
+            // Disable NavMeshAgent before mounting
+            var navAgent = npc.GetComponent<NavMeshAgent>();
+            if (navAgent != null) navAgent.enabled = false;
             
-            // Configure AI
+            // Mount NPC to vehicle seat immediately
+            mountPoint.mountable.MountPlayer(npc);
+            
+            // Configure AI - shooters should target enemy during drive-by
             if (isDriver)
             {
                 npc.Brain.SetEnabled(false); // Driver doesn't shoot
@@ -434,9 +457,11 @@ namespace Oxide.Plugins
         {
             var settings = Config["Settings"] as Dictionary<string, object>;
             float dismountDist = settings != null && settings.ContainsKey("Dismount Distance") 
-                ? Convert.ToSingle(settings["Dismount Distance"]) : 30f;
+                ? Convert.ToSingle(settings["Dismount Distance"]) : 15f;
             float shootDuration = settings != null && settings.ContainsKey("Shoot Duration (Seconds)") 
                 ? Convert.ToSingle(settings["Shoot Duration (Seconds)"]) : 10f;
+            float maxSpeed = settings != null && settings.ContainsKey("Vehicle Speed") 
+                ? Convert.ToSingle(settings["Vehicle Speed"]) : 12f;
             
             for (int i = _activeEvents.Count - 1; i >= 0; i--)
             {
@@ -450,23 +475,66 @@ namespace Oxide.Plugins
                     continue;
                 }
                 
+                // Update target position
+                BasePlayer target = BasePlayer.FindByID(ev.TargetID);
+                if (target != null && target.IsAlive())
+                    ev.TargetPosition = target.transform.position;
+                
                 // If vehicle was destroyed, just let NPCs fight
                 if (ev.VehicleDestroyed || ev.Vehicle == null || ev.Vehicle.IsDestroyed)
                 {
                     ev.VehicleDestroyed = true;
-                    // Keep updating NPC targets
                     UpdateNPCTargets(ev);
                     continue;
                 }
 
                 switch (ev.Phase)
                 {
-                    case DriveByPhase.DrivingToTarget:
-                        DriveTowardsTarget(ev, dismountDist);
+                    case DriveByPhase.FirstPass:
+                        // Drive past the target (drive-by shooting)
+                        DriveVehicle(ev, ev.UTurnPoint, maxSpeed);
+                        UpdateNPCTargets(ev); // Shooters fire while driving
+                        
+                        // Check if past target and near U-turn point
+                        float distToUTurn = Vector3.Distance(ev.Vehicle.transform.position, ev.UTurnPoint);
+                        if (distToUTurn < 30f)
+                        {
+                            ev.Phase = DriveByPhase.UTurn;
+                            ev.PhaseTimer = Time.realtimeSinceStartup;
+                        }
                         break;
                         
-                    case DriveByPhase.Stopped:
+                    case DriveByPhase.UTurn:
+                        // Slow down and turn around
+                        DriveVehicle(ev, ev.TargetPosition, maxSpeed * 0.5f);
+                        
+                        // Check if facing back towards target
+                        Vector3 toTarget = (ev.TargetPosition - ev.Vehicle.transform.position).normalized;
+                        float dotProduct = Vector3.Dot(ev.Vehicle.transform.forward, toTarget);
+                        if (dotProduct > 0.7f || Time.realtimeSinceStartup - ev.PhaseTimer > 5f)
+                        {
+                            ev.Phase = DriveByPhase.ReturnPass;
+                            ev.PhaseTimer = Time.realtimeSinceStartup;
+                        }
+                        break;
+                        
+                    case DriveByPhase.ReturnPass:
+                        // Drive back towards target
+                        DriveVehicle(ev, ev.TargetPosition, maxSpeed);
+                        UpdateNPCTargets(ev);
+                        
+                        float distToTarget = Vector3.Distance(ev.Vehicle.transform.position, ev.TargetPosition);
+                        if (distToTarget <= dismountDist)
+                        {
+                            ev.Phase = DriveByPhase.StoppingToDisembark;
+                            ev.PhaseTimer = Time.realtimeSinceStartup;
+                            StopVehicle(ev);
+                        }
+                        break;
+                        
+                    case DriveByPhase.StoppingToDisembark:
                         // Brief pause before dismount
+                        StopVehicle(ev);
                         if (Time.realtimeSinceStartup - ev.PhaseTimer > 1f)
                         {
                             DismountShooters(ev);
@@ -477,6 +545,7 @@ namespace Oxide.Plugins
                         
                     case DriveByPhase.Dismounted:
                         UpdateNPCTargets(ev);
+                        StopVehicle(ev); // Keep car stopped
                         if (Time.realtimeSinceStartup - ev.PhaseTimer > shootDuration)
                         {
                             ev.Phase = DriveByPhase.Remounting;
@@ -486,7 +555,7 @@ namespace Oxide.Plugins
                         break;
                         
                     case DriveByPhase.Remounting:
-                        // Wait for NPCs to get back in
+                        StopVehicle(ev);
                         bool allMounted = ev.Shooters.All(s => s == null || s.IsDestroyed || s.IsMounted());
                         if (allMounted || Time.realtimeSinceStartup - ev.PhaseTimer > 3f)
                         {
@@ -496,12 +565,12 @@ namespace Oxide.Plugins
                         break;
                         
                     case DriveByPhase.DrivingAway:
-                        DriveAway(ev);
+                        Vector3 exitGround = GetFlatGroundPosition(ev.ExitPosition);
+                        if (exitGround == Vector3.zero) exitGround = ev.ExitPosition;
+                        DriveVehicle(ev, exitGround, maxSpeed);
                         
                         // Check if reached exit
-                        Vector3 exitGround = GetFlatGroundPosition(ev.ExitPosition);
-                        if (exitGround != Vector3.zero && 
-                            Vector3.Distance(ev.Vehicle.transform.position, exitGround) < 50f)
+                        if (Vector3.Distance(ev.Vehicle.transform.position, exitGround) < 50f)
                         {
                             CleanUpEvent(ev, true);
                             _activeEvents.RemoveAt(i);
@@ -511,41 +580,7 @@ namespace Oxide.Plugins
             }
         }
         
-        private void DriveTowardsTarget(DriveByEvent ev, float dismountDist)
-        {
-            if (ev.Vehicle == null || ev.Vehicle.IsDestroyed) return;
-            
-            // Update target position if player moved
-            BasePlayer target = BasePlayer.FindByID(ev.TargetID);
-            if (target != null && target.IsAlive())
-                ev.TargetPosition = target.transform.position;
-            
-            float distToTarget = Vector3.Distance(ev.Vehicle.transform.position, ev.TargetPosition);
-            
-            // Close enough - stop and dismount
-            if (distToTarget <= dismountDist)
-            {
-                StopVehicle(ev);
-                ev.Phase = DriveByPhase.Stopped;
-                ev.PhaseTimer = Time.realtimeSinceStartup;
-                return;
-            }
-            
-            // Drive towards target using vehicle input
-            DriveVehicle(ev, ev.TargetPosition);
-        }
-        
-        private void DriveAway(DriveByEvent ev)
-        {
-            if (ev.Vehicle == null || ev.Vehicle.IsDestroyed) return;
-            
-            Vector3 exitGround = GetFlatGroundPosition(ev.ExitPosition);
-            if (exitGround == Vector3.zero) exitGround = ev.ExitPosition;
-            
-            DriveVehicle(ev, exitGround);
-        }
-        
-        private void DriveVehicle(DriveByEvent ev, Vector3 destination)
+        private void DriveVehicle(DriveByEvent ev, Vector3 destination, float maxSpeed = 12f)
         {
             if (ev.Vehicle == null) return;
             
@@ -577,7 +612,7 @@ namespace Oxide.Plugins
             // Apply inputs to BasicCar
             ev.Vehicle.SetFlag(BaseEntity.Flags.Reserved5, throttle > 0.5f); // Engine running
             
-            // Use reflection or physics to control car
+            // Use physics to control car smoothly
             var rb = ev.Vehicle.GetComponent<Rigidbody>();
             if (rb != null)
             {
@@ -589,9 +624,9 @@ namespace Oxide.Plugins
                 rb.AddTorque(Vector3.up * steering * 500f, ForceMode.Force);
                 
                 // Limit max speed
-                if (rb.velocity.magnitude > 15f)
+                if (rb.velocity.magnitude > maxSpeed)
                 {
-                    rb.velocity = rb.velocity.normalized * 15f;
+                    rb.velocity = rb.velocity.normalized * maxSpeed;
                 }
             }
         }
@@ -688,7 +723,8 @@ namespace Oxide.Plugins
             BasePlayer target = BasePlayer.FindByID(ev.TargetID);
             foreach (var npc in ev.Shooters)
             {
-                if (npc != null && !npc.IsDestroyed && !npc.IsMounted() && target != null && target.IsAlive())
+                // Update targets for both mounted (drive-by) and dismounted (on-foot) NPCs
+                if (npc != null && !npc.IsDestroyed && target != null && target.IsAlive())
                 {
                     npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
                 }
