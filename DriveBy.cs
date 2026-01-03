@@ -7,8 +7,8 @@ using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "1.4.3")]
-    [Description("Smart AI drive-bys with terrain navigation, dismount attacks. Spawns from territory borders.")]
+    [Info("DriveBy", "Gemini", "1.5.0")]
+    [Description("Premium AI drive-bys with proper vehicle physics, dismount attacks, terrain awareness.")]
     public class DriveBy : RustPlugin
     {
         [PluginReference]
@@ -16,23 +16,24 @@ namespace Oxide.Plugins
 
         private enum DriveByPhase
         {
-            DrivingToTarget,    // Driving towards target
-            Dismounted,          // NPCs dismounted and shooting
-            DrivingAway          // Getting back in car and leaving
+            DrivingToTarget,    // Car driving towards target
+            Stopped,             // Car stopped, NPCs getting out
+            Dismounted,          // NPCs on foot shooting
+            Remounting,          // NPCs getting back in car
+            DrivingAway          // Car driving away
         }
 
         private class DriveByEvent
         {
-            public BaseVehicle Vehicle;
+            public BasicCar Vehicle;
             public List<ScientistNPC> Shooters = new List<ScientistNPC>();
-            public Vector3 TargetPosition;        // Where the target was when event started
-            public Vector3 ExitPosition;          // Where to drive off to (map edge)
+            public Vector3 TargetPosition;
+            public Vector3 ExitPosition;
             public ulong TargetID;
             public string GangOwner;
             public DriveByPhase Phase = DriveByPhase.DrivingToTarget;
-            public float DismountTimer;           // Time NPCs stay dismounted
-            public float StuckTimer;              // To detect if vehicle is stuck
-            public Vector3 LastPosition;          // For stuck detection
+            public float PhaseTimer;
+            public bool VehicleDestroyed = false;
         }
 
         private List<DriveByEvent> _activeEvents = new List<DriveByEvent>();
@@ -41,12 +42,6 @@ namespace Oxide.Plugins
         private const string PrefabSedan = "assets/content/vehicles/sedan_a/sedantest.entity.prefab";
         private const string PrefabScientist = "assets/rust.ai/agents/npcplayer/humannpc/scientist/scientistnpc_roam.prefab";
         private const string PermAdmin = "hoodwars.admin";
-        
-        // Dismount settings
-        private const float DismountDistance = 25f;      // Distance from target to dismount
-        private const float DismountDuration = 8f;       // How long NPCs stay out shooting
-        private const float StuckThreshold = 2f;         // Time before considering vehicle stuck
-        private const float ObstacleCheckDistance = 5f;  // Raycast distance for obstacles
 
         #region Configuration
 
@@ -66,11 +61,9 @@ namespace Oxide.Plugins
             {
                 ["Detection Interval (Seconds)"] = 30,
                 ["Cooldown per Player (Minutes)"] = 10,
-                ["Vehicle Speed"] = 12f,
-                ["NPC Accuracy (0.0 to 1.0)"] = 0.65f,
-                ["Dismount Distance"] = 25f,
-                ["Dismount Duration (Seconds)"] = 8f,
-                ["Spawn Distance From Border"] = 50f
+                ["Dismount Distance"] = 30f,
+                ["Shoot Duration (Seconds)"] = 10f,
+                ["Spawn Distance From Border"] = 100f
             };
 
             Config["Visuals"] = new Dictionary<string, object>
@@ -131,12 +124,12 @@ namespace Oxide.Plugins
 
         #endregion
 
-        #region Core Loop
+        #region Hooks
 
         private void OnServerInitialized()
         {
-            // Smooth 10 FPS drive-by updates
-            _eventTimer = timer.Every(0.1f, UpdateActiveDriveBys);
+            // Update at 5Hz for smooth vehicle control
+            _eventTimer = timer.Every(0.2f, UpdateActiveDriveBys);
             
             var settings = Config["Settings"] as Dictionary<string, object>;
             float interval = settings != null ? Convert.ToSingle(settings["Detection Interval (Seconds)"]) : 30f;
@@ -147,7 +140,39 @@ namespace Oxide.Plugins
         private void Unload()
         {
             _eventTimer?.Destroy();
-            foreach (var ev in _activeEvents) CleanUpEvent(ev);
+            foreach (var ev in _activeEvents) CleanUpEvent(ev, true);
+        }
+
+        private void OnEntityDeath(BaseCombatEntity entity, HitInfo info)
+        {
+            // Check if a drive-by NPC died
+            var npc = entity as ScientistNPC;
+            if (npc == null) return;
+            
+            foreach (var ev in _activeEvents)
+            {
+                if (ev.Shooters.Contains(npc))
+                {
+                    ev.Shooters.Remove(npc);
+                    
+                    // If any NPC dies, despawn the car but keep remaining NPCs fighting
+                    if (ev.Vehicle != null && !ev.Vehicle.IsDestroyed && !ev.VehicleDestroyed)
+                    {
+                        ev.VehicleDestroyed = true;
+                        // Dismount any NPCs still in the car
+                        foreach (var shooter in ev.Shooters)
+                        {
+                            if (shooter != null && !shooter.IsDestroyed && shooter.IsMounted())
+                            {
+                                shooter.DismountObject();
+                                EnableNPCCombat(shooter, ev);
+                            }
+                        }
+                        ev.Vehicle.Kill();
+                    }
+                    break;
+                }
+            }
         }
 
         private void CheckForIntruders()
@@ -158,7 +183,6 @@ namespace Oxide.Plugins
             {
                 if (player == null || player.IsSleeping() || !player.IsAlive() || player.IsAdmin) continue;
 
-                // Uses the GetNeighborhoodNameAt string-return hook to prevent InvalidCastException
                 string currentZone = HoodWars.Call<string>("GetNeighborhoodNameAt", player.transform.position) ?? "Neutral";
                 string homeGang = HoodWars.Call<string>("GetPlayerGangName", player.userID) ?? "Neutral";
 
@@ -175,29 +199,23 @@ namespace Oxide.Plugins
 
         private void StartDriveBy(BasePlayer target, string territoryGang)
         {
-            // Get spawn position from territory border
-            Vector3 spawnPos = GetBorderSpawnPosition(territoryGang, target.transform.position);
+            // Find a road/flat spawn position from territory border
+            Vector3 spawnPos = GetRoadSpawnPosition(territoryGang, target.transform.position);
             if (spawnPos == Vector3.zero)
             {
-                Puts($"[DriveBy] Could not find valid spawn for {territoryGang}");
+                Puts($"[DriveBy] Could not find valid road spawn for {territoryGang}");
                 return;
             }
             
-            // Calculate exit position (opposite side from spawn, towards map edge)
             Vector3 exitPos = GetExitPosition(territoryGang, target.transform.position);
-            
-            // Get proper ground height for spawn
-            spawnPos = GetGroundPosition(spawnPos);
-            
-            // Face towards target
             Quaternion rotation = Quaternion.LookRotation((target.transform.position - spawnPos).normalized);
+            rotation.x = 0;
+            rotation.z = 0;
             
-            BaseVehicle vehicle = GameManager.server.CreateEntity(PrefabSedan, spawnPos, rotation) as BaseVehicle;
+            BasicCar vehicle = GameManager.server.CreateEntity(PrefabSedan, spawnPos, rotation) as BasicCar;
             if (vehicle == null) return;
 
             vehicle.Spawn();
-            
-            // sedan test entity doesn't need fuel - it just works
             
             DriveByEvent ev = new DriveByEvent
             {
@@ -207,52 +225,98 @@ namespace Oxide.Plugins
                 TargetID = target.userID,
                 GangOwner = territoryGang,
                 Phase = DriveByPhase.DrivingToTarget,
-                LastPosition = spawnPos
+                PhaseTimer = Time.realtimeSinceStartup
             };
 
-            // seatIndex 0: Driver, 1: Front Passenger, 2: Rear Left
-            SpawnGangNPC(ev, 0, true); 
-            SpawnGangNPC(ev, 1, false); 
-            SpawnGangNPC(ev, 2, false); 
+            // Spawn 3 NPCs properly seated in vehicle
+            // Seat 0 = Driver, Seat 1 = Front passenger, Seat 2 = Rear
+            SpawnSeatedNPC(ev, 0, true);   // Driver
+            SpawnSeatedNPC(ev, 1, false);  // Shooter 1
+            SpawnSeatedNPC(ev, 2, false);  // Shooter 2
 
             _activeEvents.Add(ev);
             SetCooldown(target.userID);
             
-            PrintToChat($"<color=#ff4444>[STREET NEWS]</color> Drive-by in progress in {territoryGang}! Rivals repping on site.");
+            PrintToChat($"<color=#ff4444>[STREET NEWS]</color> Drive-by in progress in {territoryGang} territory!");
         }
         
-        private Vector3 GetBorderSpawnPosition(string gang, Vector3 targetPos)
+        private Vector3 GetRoadSpawnPosition(string gang, Vector3 targetPos)
         {
             var borderConfig = Config["Border Spawns"] as Dictionary<string, object>;
             var settings = Config["Settings"] as Dictionary<string, object>;
             float spawnDist = settings != null && settings.ContainsKey("Spawn Distance From Border") 
-                ? Convert.ToSingle(settings["Spawn Distance From Border"]) : 50f;
+                ? Convert.ToSingle(settings["Spawn Distance From Border"]) : 100f;
             
             string direction = "west";
             if (borderConfig != null && borderConfig.ContainsKey(gang))
                 direction = borderConfig[gang].ToString().ToLower();
             
-            // Get world size for map boundaries
             float worldSize = TerrainMeta.Size.x / 2f;
-            Vector3 spawnPos = targetPos;
+            Vector3 basePos = targetPos;
             
+            // Start from border direction
             switch (direction)
             {
                 case "west":
-                    spawnPos = new Vector3(-worldSize + spawnDist, 0, targetPos.z);
+                    basePos = new Vector3(-worldSize + spawnDist, 0, targetPos.z);
                     break;
                 case "east":
-                    spawnPos = new Vector3(worldSize - spawnDist, 0, targetPos.z);
+                    basePos = new Vector3(worldSize - spawnDist, 0, targetPos.z);
                     break;
                 case "north":
-                    spawnPos = new Vector3(targetPos.x, 0, worldSize - spawnDist);
+                    basePos = new Vector3(targetPos.x, 0, worldSize - spawnDist);
                     break;
                 case "south":
-                    spawnPos = new Vector3(targetPos.x, 0, -worldSize + spawnDist);
+                    basePos = new Vector3(targetPos.x, 0, -worldSize + spawnDist);
                     break;
             }
             
-            return spawnPos;
+            // Find flat ground - search for a good spawn point
+            for (int i = 0; i < 10; i++)
+            {
+                Vector3 testPos = basePos + new Vector3(
+                    UnityEngine.Random.Range(-20f, 20f), 
+                    0, 
+                    UnityEngine.Random.Range(-20f, 20f)
+                );
+                
+                testPos = GetFlatGroundPosition(testPos);
+                if (testPos != Vector3.zero && !IsInWater(testPos) && IsFlatEnough(testPos))
+                {
+                    return testPos;
+                }
+            }
+            
+            // Fallback to simple ground position
+            return GetFlatGroundPosition(basePos);
+        }
+        
+        private Vector3 GetFlatGroundPosition(Vector3 pos)
+        {
+            RaycastHit hit;
+            pos.y = 500f;
+            if (Physics.Raycast(pos, Vector3.down, out hit, 1000f, LayerMask.GetMask("Terrain", "World")))
+            {
+                return hit.point + Vector3.up * 0.5f;
+            }
+            return Vector3.zero;
+        }
+        
+        private bool IsInWater(Vector3 pos)
+        {
+            return pos.y < WaterSystem.OceanLevel + 0.5f;
+        }
+        
+        private bool IsFlatEnough(Vector3 pos)
+        {
+            // Check if terrain is relatively flat (slope < 20 degrees)
+            RaycastHit hit;
+            if (Physics.Raycast(pos + Vector3.up * 2f, Vector3.down, out hit, 5f, LayerMask.GetMask("Terrain")))
+            {
+                float angle = Vector3.Angle(hit.normal, Vector3.up);
+                return angle < 20f;
+            }
+            return true;
         }
         
         private Vector3 GetExitPosition(string gang, Vector3 targetPos)
@@ -264,61 +328,35 @@ namespace Oxide.Plugins
             
             float worldSize = TerrainMeta.Size.x / 2f;
             
-            // Exit opposite from where we spawned
+            // Exit opposite from spawn
             switch (direction)
             {
                 case "west":
-                    return new Vector3(worldSize - 30f, 0, targetPos.z);
+                    return new Vector3(worldSize - 50f, 0, targetPos.z);
                 case "east":
-                    return new Vector3(-worldSize + 30f, 0, targetPos.z);
+                    return new Vector3(-worldSize + 50f, 0, targetPos.z);
                 case "north":
-                    return new Vector3(targetPos.x, 0, -worldSize + 30f);
+                    return new Vector3(targetPos.x, 0, -worldSize + 50f);
                 case "south":
-                    return new Vector3(targetPos.x, 0, worldSize - 30f);
+                    return new Vector3(targetPos.x, 0, worldSize - 50f);
             }
-            return targetPos + (Vector3.forward * 200f);
-        }
-        
-        private Vector3 GetGroundPosition(Vector3 pos)
-        {
-            RaycastHit hit;
-            pos.y = 500f; // Start high
-            if (Physics.Raycast(pos, Vector3.down, out hit, 1000f, LayerMask.GetMask("Terrain", "World", "Default")))
-            {
-                return hit.point + Vector3.up * 0.5f; // Slight offset above ground
-            }
-            return pos;
+            return targetPos + Vector3.forward * 200f;
         }
 
-        private void SpawnGangNPC(DriveByEvent ev, int seatIndex, bool isDriver)
+        private void SpawnSeatedNPC(DriveByEvent ev, int seatIndex, bool isDriver)
         {
-            // Find a valid NavMesh position near the vehicle to spawn the NPC
-            Vector3 spawnPos = ev.Vehicle.transform.position;
-            NavMeshHit navHit;
-            if (NavMesh.SamplePosition(spawnPos, out navHit, 50f, NavMesh.AllAreas))
-            {
-                spawnPos = navHit.position;
-            }
-            else
-            {
-                // Try finding ground position if NavMesh fails
-                spawnPos = GetGroundPosition(ev.Vehicle.transform.position);
-            }
+            // Spawn NPC near vehicle first
+            Vector3 spawnPos = ev.Vehicle.transform.position + ev.Vehicle.transform.right * 2f;
+            spawnPos = GetFlatGroundPosition(spawnPos);
+            if (spawnPos == Vector3.zero) spawnPos = ev.Vehicle.transform.position;
             
             ScientistNPC npc = GameManager.server.CreateEntity(PrefabScientist, spawnPos, Quaternion.identity) as ScientistNPC;
             if (npc == null) return;
 
             npc.Spawn();
-            
-            // Disable NavMeshAgent so it doesn't interfere with mounting
-            var navAgent = npc.GetComponent<NavMeshAgent>();
-            if (navAgent != null)
-            {
-                navAgent.enabled = false;
-            }
-            
             npc.inventory.Strip();
 
+            // Dress NPC in gang colors
             if (_gangKits.TryGetValue(ev.GangOwner, out var kit))
             {
                 foreach (var itemShort in kit.Clothing)
@@ -332,66 +370,140 @@ namespace Oxide.Plugins
                 npc.UpdateActiveItem(weapon.uid);
             }
 
-            // Mounting logic for sedan_b
+            // Mount NPC to vehicle seat
             if (ev.Vehicle.mountPoints != null && seatIndex < ev.Vehicle.mountPoints.Count)
             {
-                BaseMountable mountable = ev.Vehicle.mountPoints[seatIndex].mountable;
-                if (mountable != null) mountable.MountPlayer(npc);
+                var mountPoint = ev.Vehicle.mountPoints[seatIndex];
+                if (mountPoint?.mountable != null)
+                {
+                    // Teleport to mount position first
+                    npc.transform.position = mountPoint.mountable.transform.position;
+                    mountPoint.mountable.MountPlayer(npc);
+                }
             }
             
-            if (!isDriver)
+            // Configure AI
+            if (isDriver)
+            {
+                npc.Brain.SetEnabled(false); // Driver doesn't shoot
+            }
+            else
             {
                 npc.Brain.SetEnabled(true);
                 BasePlayer target = BasePlayer.FindByID(ev.TargetID);
                 if (target != null)
                 {
-                    // Update: Fixed compilation error by removing SetFact.
-                    // Sensory injection is the most reliable way to trigger combat in modern builds.
-                    // The AI's internal update cycle will automatically pick up the 'Known' target and engage.
                     npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
                 }
             }
-            else
-            {
-                npc.Brain.SetEnabled(false); 
-            }
 
             ev.Shooters.Add(npc);
+        }
+        
+        private void EnableNPCCombat(ScientistNPC npc, DriveByEvent ev)
+        {
+            if (npc == null || npc.IsDestroyed) return;
+            
+            // Find valid NavMesh position
+            NavMeshHit navHit;
+            Vector3 pos = npc.transform.position;
+            if (NavMesh.SamplePosition(pos, out navHit, 20f, NavMesh.AllAreas))
+            {
+                npc.transform.position = navHit.position;
+            }
+            
+            // Enable NavMesh for proper movement
+            var navAgent = npc.GetComponent<NavMeshAgent>();
+            if (navAgent != null)
+            {
+                navAgent.enabled = true;
+                navAgent.Warp(npc.transform.position);
+            }
+            
+            npc.Brain.SetEnabled(true);
+            
+            // Set target
+            BasePlayer target = BasePlayer.FindByID(ev.TargetID);
+            if (target != null && target.IsAlive())
+            {
+                npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
+            }
         }
 
         private void UpdateActiveDriveBys()
         {
             var settings = Config["Settings"] as Dictionary<string, object>;
-            float speed = settings != null && settings.ContainsKey("Vehicle Speed") ? Convert.ToSingle(settings["Vehicle Speed"]) : 12f;
-            float dismountDist = settings != null && settings.ContainsKey("Dismount Distance") ? Convert.ToSingle(settings["Dismount Distance"]) : 25f;
-            float dismountDuration = settings != null && settings.ContainsKey("Dismount Duration (Seconds)") ? Convert.ToSingle(settings["Dismount Duration (Seconds)"]) : 8f;
+            float dismountDist = settings != null && settings.ContainsKey("Dismount Distance") 
+                ? Convert.ToSingle(settings["Dismount Distance"]) : 30f;
+            float shootDuration = settings != null && settings.ContainsKey("Shoot Duration (Seconds)") 
+                ? Convert.ToSingle(settings["Shoot Duration (Seconds)"]) : 10f;
             
             for (int i = _activeEvents.Count - 1; i >= 0; i--)
             {
                 var ev = _activeEvents[i];
-                if (ev?.Vehicle == null || ev.Vehicle.IsDestroyed)
+                
+                // Clean up if all NPCs dead
+                if (ev.Shooters.Count == 0 || ev.Shooters.All(s => s == null || s.IsDestroyed))
                 {
-                    CleanUpEvent(ev);
+                    CleanUpEvent(ev, true);
                     _activeEvents.RemoveAt(i);
+                    continue;
+                }
+                
+                // If vehicle was destroyed, just let NPCs fight
+                if (ev.VehicleDestroyed || ev.Vehicle == null || ev.Vehicle.IsDestroyed)
+                {
+                    ev.VehicleDestroyed = true;
+                    // Keep updating NPC targets
+                    UpdateNPCTargets(ev);
                     continue;
                 }
 
                 switch (ev.Phase)
                 {
                     case DriveByPhase.DrivingToTarget:
-                        UpdateDriveToTarget(ev, speed, dismountDist);
+                        DriveTowardsTarget(ev, dismountDist);
+                        break;
+                        
+                    case DriveByPhase.Stopped:
+                        // Brief pause before dismount
+                        if (Time.realtimeSinceStartup - ev.PhaseTimer > 1f)
+                        {
+                            DismountShooters(ev);
+                            ev.Phase = DriveByPhase.Dismounted;
+                            ev.PhaseTimer = Time.realtimeSinceStartup;
+                        }
                         break;
                         
                     case DriveByPhase.Dismounted:
-                        UpdateDismounted(ev, dismountDuration);
+                        UpdateNPCTargets(ev);
+                        if (Time.realtimeSinceStartup - ev.PhaseTimer > shootDuration)
+                        {
+                            ev.Phase = DriveByPhase.Remounting;
+                            ev.PhaseTimer = Time.realtimeSinceStartup;
+                            RemountShooters(ev);
+                        }
+                        break;
+                        
+                    case DriveByPhase.Remounting:
+                        // Wait for NPCs to get back in
+                        bool allMounted = ev.Shooters.All(s => s == null || s.IsDestroyed || s.IsMounted());
+                        if (allMounted || Time.realtimeSinceStartup - ev.PhaseTimer > 3f)
+                        {
+                            ev.Phase = DriveByPhase.DrivingAway;
+                            ev.PhaseTimer = Time.realtimeSinceStartup;
+                        }
                         break;
                         
                     case DriveByPhase.DrivingAway:
-                        UpdateDriveAway(ev, speed);
-                        if (ev.Phase == DriveByPhase.DrivingAway && 
-                            Vector3.Distance(ev.Vehicle.transform.position, ev.ExitPosition) < 30f)
+                        DriveAway(ev);
+                        
+                        // Check if reached exit
+                        Vector3 exitGround = GetFlatGroundPosition(ev.ExitPosition);
+                        if (exitGround != Vector3.zero && 
+                            Vector3.Distance(ev.Vehicle.transform.position, exitGround) < 50f)
                         {
-                            CleanUpEvent(ev);
+                            CleanUpEvent(ev, true);
                             _activeEvents.RemoveAt(i);
                         }
                         break;
@@ -399,31 +511,180 @@ namespace Oxide.Plugins
             }
         }
         
-        private void UpdateDriveToTarget(DriveByEvent ev, float speed, float dismountDist)
+        private void DriveTowardsTarget(DriveByEvent ev, float dismountDist)
         {
-            // Update target position if target is still alive
+            if (ev.Vehicle == null || ev.Vehicle.IsDestroyed) return;
+            
+            // Update target position if player moved
             BasePlayer target = BasePlayer.FindByID(ev.TargetID);
             if (target != null && target.IsAlive())
                 ev.TargetPosition = target.transform.position;
             
             float distToTarget = Vector3.Distance(ev.Vehicle.transform.position, ev.TargetPosition);
             
-            // Close enough to dismount?
+            // Close enough - stop and dismount
             if (distToTarget <= dismountDist)
             {
-                DismountNPCs(ev);
-                ev.Phase = DriveByPhase.Dismounted;
-                ev.DismountTimer = Time.realtimeSinceStartup;
+                StopVehicle(ev);
+                ev.Phase = DriveByPhase.Stopped;
+                ev.PhaseTimer = Time.realtimeSinceStartup;
                 return;
             }
             
-            // Smart driving towards target
-            SmartDrive(ev, ev.TargetPosition, speed);
+            // Drive towards target using vehicle input
+            DriveVehicle(ev, ev.TargetPosition);
         }
         
-        private void UpdateDismounted(DriveByEvent ev, float dismountDuration)
+        private void DriveAway(DriveByEvent ev)
         {
-            // Keep NPCs targeting the player
+            if (ev.Vehicle == null || ev.Vehicle.IsDestroyed) return;
+            
+            Vector3 exitGround = GetFlatGroundPosition(ev.ExitPosition);
+            if (exitGround == Vector3.zero) exitGround = ev.ExitPosition;
+            
+            DriveVehicle(ev, exitGround);
+        }
+        
+        private void DriveVehicle(DriveByEvent ev, Vector3 destination)
+        {
+            if (ev.Vehicle == null) return;
+            
+            Vector3 toTarget = destination - ev.Vehicle.transform.position;
+            toTarget.y = 0;
+            
+            if (toTarget.magnitude < 5f) return;
+            
+            // Calculate steering
+            Vector3 forward = ev.Vehicle.transform.forward;
+            forward.y = 0;
+            float angle = Vector3.SignedAngle(forward, toTarget.normalized, Vector3.up);
+            
+            // Apply throttle and steering via vehicle physics
+            float throttle = 1f;
+            float steering = Mathf.Clamp(angle / 45f, -1f, 1f);
+            
+            // Reduce speed on turns
+            if (Mathf.Abs(angle) > 30f)
+                throttle = 0.5f;
+            
+            // Check for obstacles/steep terrain ahead
+            if (ShouldAvoidAhead(ev.Vehicle.transform.position, forward))
+            {
+                throttle = 0.3f;
+                steering = angle > 0 ? -0.8f : 0.8f; // Turn away
+            }
+            
+            // Apply inputs to BasicCar
+            ev.Vehicle.SetFlag(BaseEntity.Flags.Reserved5, throttle > 0.5f); // Engine running
+            
+            // Use reflection or physics to control car
+            var rb = ev.Vehicle.GetComponent<Rigidbody>();
+            if (rb != null)
+            {
+                // Apply force for movement
+                Vector3 driveForce = ev.Vehicle.transform.forward * throttle * 2000f;
+                rb.AddForce(driveForce, ForceMode.Force);
+                
+                // Apply torque for steering
+                rb.AddTorque(Vector3.up * steering * 500f, ForceMode.Force);
+                
+                // Limit max speed
+                if (rb.velocity.magnitude > 15f)
+                {
+                    rb.velocity = rb.velocity.normalized * 15f;
+                }
+            }
+        }
+        
+        private void StopVehicle(DriveByEvent ev)
+        {
+            if (ev.Vehicle == null) return;
+            
+            var rb = ev.Vehicle.GetComponent<Rigidbody>();
+            if (rb != null)
+            {
+                rb.velocity = Vector3.zero;
+                rb.angularVelocity = Vector3.zero;
+            }
+        }
+        
+        private bool ShouldAvoidAhead(Vector3 pos, Vector3 forward)
+        {
+            RaycastHit hit;
+            
+            // Check for obstacles
+            if (Physics.Raycast(pos + Vector3.up, forward, out hit, 10f, 
+                LayerMask.GetMask("World", "Construction", "Deployed")))
+            {
+                return true;
+            }
+            
+            // Check terrain steepness ahead
+            Vector3 aheadPos = pos + forward * 8f;
+            aheadPos.y = 500f;
+            if (Physics.Raycast(aheadPos, Vector3.down, out hit, 1000f, LayerMask.GetMask("Terrain")))
+            {
+                float angle = Vector3.Angle(hit.normal, Vector3.up);
+                if (angle > 25f) return true; // Too steep
+                
+                // Check for big height difference
+                float heightDiff = Mathf.Abs(hit.point.y - pos.y);
+                if (heightDiff > 3f) return true; // Too much elevation change
+            }
+            
+            return false;
+        }
+        
+        private void DismountShooters(DriveByEvent ev)
+        {
+            foreach (var npc in ev.Shooters)
+            {
+                if (npc != null && !npc.IsDestroyed && npc.IsMounted())
+                {
+                    npc.DismountObject();
+                    
+                    // Small delay then enable combat
+                    timer.Once(0.5f, () => {
+                        if (npc != null && !npc.IsDestroyed)
+                            EnableNPCCombat(npc, ev);
+                    });
+                }
+            }
+        }
+        
+        private void RemountShooters(DriveByEvent ev)
+        {
+            if (ev.Vehicle == null || ev.Vehicle.IsDestroyed) return;
+            
+            int seatIndex = 0;
+            foreach (var npc in ev.Shooters)
+            {
+                if (npc != null && !npc.IsDestroyed && !npc.IsMounted())
+                {
+                    // Disable NavMesh
+                    var navAgent = npc.GetComponent<NavMeshAgent>();
+                    if (navAgent != null) navAgent.enabled = false;
+                    
+                    // Mount to vehicle
+                    if (ev.Vehicle.mountPoints != null && seatIndex < ev.Vehicle.mountPoints.Count)
+                    {
+                        var mountPoint = ev.Vehicle.mountPoints[seatIndex];
+                        if (mountPoint?.mountable != null)
+                        {
+                            npc.transform.position = mountPoint.mountable.transform.position;
+                            mountPoint.mountable.MountPlayer(npc);
+                            
+                            if (seatIndex == 0) // Driver
+                                npc.Brain.SetEnabled(false);
+                        }
+                    }
+                }
+                seatIndex++;
+            }
+        }
+        
+        private void UpdateNPCTargets(DriveByEvent ev)
+        {
             BasePlayer target = BasePlayer.FindByID(ev.TargetID);
             foreach (var npc in ev.Shooters)
             {
@@ -432,186 +693,22 @@ namespace Oxide.Plugins
                     npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
                 }
             }
-            
-            // Time to get back in the car?
-            if (Time.realtimeSinceStartup - ev.DismountTimer >= dismountDuration)
-            {
-                RemountNPCs(ev);
-                ev.Phase = DriveByPhase.DrivingAway;
-                ev.ExitPosition = GetGroundPosition(ev.ExitPosition);
-            }
-        }
-        
-        private void UpdateDriveAway(DriveByEvent ev, float speed)
-        {
-            SmartDrive(ev, ev.ExitPosition, speed * 1.2f); // Drive faster when leaving
-        }
-        
-        private void SmartDrive(DriveByEvent ev, Vector3 destination, float speed)
-        {
-            Vector3 currentPos = ev.Vehicle.transform.position;
-            Vector3 direction = (destination - currentPos).normalized;
-            direction.y = 0; // Keep horizontal
-            
-            // Check for obstacles ahead
-            Vector3 avoidanceDir = GetAvoidanceDirection(currentPos, direction);
-            if (avoidanceDir != Vector3.zero)
-                direction = Vector3.Lerp(direction, avoidanceDir, 0.7f).normalized;
-            
-            // Get ground position for next move
-            Vector3 nextPos = currentPos + (direction * speed * 0.1f);
-            nextPos = GetGroundPosition(nextPos);
-            
-            // Ensure we stay on ground (not in water/air)
-            if (nextPos.y < WaterSystem.OceanLevel + 1f)
-                nextPos.y = WaterSystem.OceanLevel + 1f;
-            
-            // Smooth movement
-            ev.Vehicle.transform.position = Vector3.Lerp(currentPos, nextPos, 0.5f);
-            
-            // Smooth rotation
-            if (direction != Vector3.zero)
-            {
-                Quaternion targetRotation = Quaternion.LookRotation(direction);
-                ev.Vehicle.transform.rotation = Quaternion.Slerp(ev.Vehicle.transform.rotation, targetRotation, 0.1f);
-            }
-            
-            ev.Vehicle.SendNetworkUpdate();
-            
-            // Stuck detection
-            if (Vector3.Distance(currentPos, ev.LastPosition) < 0.1f)
-            {
-                ev.StuckTimer += 0.1f;
-                if (ev.StuckTimer > StuckThreshold)
-                {
-                    // Teleport slightly forward and to the side
-                    Vector3 unstuck = currentPos + (ev.Vehicle.transform.right * 3f) + (direction * 3f);
-                    ev.Vehicle.transform.position = GetGroundPosition(unstuck);
-                    ev.StuckTimer = 0f;
-                }
-            }
-            else
-            {
-                ev.StuckTimer = 0f;
-            }
-            ev.LastPosition = ev.Vehicle.transform.position;
-        }
-        
-        private Vector3 GetAvoidanceDirection(Vector3 pos, Vector3 forward)
-        {
-            // Raycast to check for obstacles
-            RaycastHit hit;
-            
-            // Check straight ahead
-            if (Physics.Raycast(pos + Vector3.up, forward, out hit, ObstacleCheckDistance, 
-                LayerMask.GetMask("World", "Construction", "Deployed")))
-            {
-                // Obstacle ahead - try left or right
-                Vector3 leftDir = Quaternion.Euler(0, -45, 0) * forward;
-                Vector3 rightDir = Quaternion.Euler(0, 45, 0) * forward;
-                
-                bool leftClear = !Physics.Raycast(pos + Vector3.up, leftDir, ObstacleCheckDistance,
-                    LayerMask.GetMask("World", "Construction", "Deployed"));
-                bool rightClear = !Physics.Raycast(pos + Vector3.up, rightDir, ObstacleCheckDistance,
-                    LayerMask.GetMask("World", "Construction", "Deployed"));
-                
-                if (leftClear && !rightClear) return leftDir;
-                if (rightClear && !leftClear) return rightDir;
-                if (leftClear && rightClear)
-                {
-                    // Both clear, pick randomly
-                    return UnityEngine.Random.value > 0.5f ? leftDir : rightDir;
-                }
-                
-                // Both blocked, try harder turns
-                leftDir = Quaternion.Euler(0, -90, 0) * forward;
-                rightDir = Quaternion.Euler(0, 90, 0) * forward;
-                leftClear = !Physics.Raycast(pos + Vector3.up, leftDir, ObstacleCheckDistance);
-                if (leftClear) return leftDir;
-                return rightDir;
-            }
-            
-            return Vector3.zero; // No obstacle, continue forward
-        }
-        
-        private void DismountNPCs(DriveByEvent ev)
-        {
-            foreach (var npc in ev.Shooters)
-            {
-                if (npc != null && !npc.IsDestroyed && npc.IsMounted())
-                {
-                    // Get dismount position on NavMesh
-                    Vector3 dismountPos = ev.Vehicle.transform.position + (ev.Vehicle.transform.right * 3f);
-                    NavMeshHit navHit;
-                    if (NavMesh.SamplePosition(dismountPos, out navHit, 10f, NavMesh.AllAreas))
-                    {
-                        dismountPos = navHit.position;
-                    }
-                    
-                    npc.DismountObject();
-                    
-                    // Re-enable NavMeshAgent and position on NavMesh
-                    var navAgent = npc.GetComponent<NavMeshAgent>();
-                    if (navAgent != null)
-                    {
-                        npc.transform.position = dismountPos;
-                        navAgent.Warp(dismountPos);
-                        navAgent.enabled = true;
-                    }
-                    
-                    npc.Brain.SetEnabled(true);
-                    
-                    // Set combat target
-                    BasePlayer target = BasePlayer.FindByID(ev.TargetID);
-                    if (target != null)
-                    {
-                        npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
-                    }
-                }
-            }
-        }
-        
-        private void RemountNPCs(DriveByEvent ev)
-        {
-            int seatIndex = 0;
-            foreach (var npc in ev.Shooters)
-            {
-                if (npc != null && !npc.IsDestroyed && !npc.IsMounted())
-                {
-                    // Disable NavMeshAgent before mounting
-                    var navAgent = npc.GetComponent<NavMeshAgent>();
-                    if (navAgent != null)
-                    {
-                        navAgent.enabled = false;
-                    }
-                    
-                    // Teleport to vehicle first
-                    npc.transform.position = ev.Vehicle.transform.position;
-                    
-                    // Mount in next available seat
-                    if (ev.Vehicle.mountPoints != null && seatIndex < ev.Vehicle.mountPoints.Count)
-                    {
-                        BaseMountable mountable = ev.Vehicle.mountPoints[seatIndex].mountable;
-                        if (mountable != null) 
-                        {
-                            mountable.MountPlayer(npc);
-                            if (seatIndex == 0) // Driver
-                                npc.Brain.SetEnabled(false);
-                        }
-                    }
-                    seatIndex++;
-                }
-            }
         }
 
-        private void CleanUpEvent(DriveByEvent ev)
+        private void CleanUpEvent(DriveByEvent ev, bool killAll)
         {
             if (ev == null) return;
-            foreach (var npc in ev.Shooters)
+            
+            if (killAll)
             {
-                if (npc != null && !npc.IsDestroyed) npc.Kill();
+                foreach (var npc in ev.Shooters)
+                {
+                    if (npc != null && !npc.IsDestroyed) npc.Kill();
+                }
             }
-            if (ev.Vehicle != null && !ev.Vehicle.IsDestroyed) ev.Vehicle.Kill();
+            
+            if (ev.Vehicle != null && !ev.Vehicle.IsDestroyed) 
+                ev.Vehicle.Kill();
         }
 
         #endregion
