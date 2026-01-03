@@ -7,8 +7,8 @@ using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "2.0.5")]
-    [Description("Premium AI drive-bys: Improved hill climbing, stable driving, proper damage, and authentic NPC movement.")]
+    [Info("DriveBy", "Gemini", "2.0.6")]
+    [Description("Premium AI drive-bys: Continuous steering, escape despawn, and destroys natural obstacles.")]
     public class DriveBy : RustPlugin
     {
         [PluginReference]
@@ -41,6 +41,7 @@ namespace Oxide.Plugins
 
         private List<DriveByEvent> _activeEvents = new List<DriveByEvent>();
         private HashSet<ulong> _driveByNPCs = new HashSet<ulong>();  // Track our NPCs for damage handling
+        private HashSet<ulong> _driveByVehicles = new HashSet<ulong>();  // Track our vehicles for collision handling
         private Timer _eventTimer;
 
         private const string PrefabSedan = "assets/content/vehicles/sedan_a/sedantest.entity.prefab";
@@ -58,6 +59,17 @@ namespace Oxide.Plugins
         }
 
         private Dictionary<string, GangVisuals> _gangKits = new Dictionary<string, GangVisuals>();
+        
+        // Natural resource prefabs that can be destroyed by the car
+        private static HashSet<string> _destructiblePrefabs = new HashSet<string>
+        {
+            "tree", "oak", "birch", "pine", "beech", "palm", "swamp",
+            "dead_log", "driftwood", "log_pile",
+            "stone-ore", "metal-ore", "sulfur-ore",
+            "collectable",
+            "bush", "grass", "hemp", "corn", "pumpkin", "potato", "berry",
+            "minecart", "barrel", "crate"
+        };
 
         protected override void LoadDefaultConfig()
         {
@@ -67,6 +79,7 @@ namespace Oxide.Plugins
                 ["Cooldown per Player (Minutes)"] = 10,
                 ["Dismount Distance"] = 15f,         // How close to stop for dismount
                 ["Chase Distance"] = 40f,            // If player moves this far while dismounted, chase them
+                ["Escape Distance"] = 150f,          // If player escapes this far, despawn the event
                 ["Shoot Duration (Seconds)"] = 10f,
                 ["Min Shoot Distance"] = 10f,         // Minimum distance to shoot
                 ["Max Shoot Distance"] = 60f,         // Maximum distance to shoot
@@ -151,6 +164,7 @@ namespace Oxide.Plugins
         {
             _eventTimer?.Destroy();
             _driveByNPCs.Clear();
+            _driveByVehicles.Clear();
             foreach (var ev in _activeEvents) CleanUpEvent(ev, true);
         }
         
@@ -182,6 +196,95 @@ namespace Oxide.Plugins
                 }
             }
             // Don't return anything - void return means damage proceeds normally
+        }
+        
+        // Handle collisions with natural resources - destroy trees, ore, etc.
+        private void OnEntityEnter(TriggerBase trigger, BaseEntity entity)
+        {
+            // Check if this is one of our drive-by vehicles
+            var vehicle = trigger.GetComponentInParent<BasicCar>();
+            if (vehicle == null || vehicle.net == null) return;
+            
+            // Check if this vehicle belongs to a drive-by event using fast lookup
+            if (!_driveByVehicles.Contains(vehicle.net.ID.Value)) return;
+            
+            // Check if the entity is a natural resource that can be destroyed
+            if (IsDestructibleResource(entity))
+            {
+                entity.Kill(BaseNetworkable.DestroyMode.Gib);
+            }
+        }
+        
+        // Alternative collision hook using physics
+        private void OnCollision(BaseEntity entity, Collision collision)
+        {
+            // Check if this is one of our drive-by vehicles
+            var vehicle = entity as BasicCar;
+            if (vehicle == null || vehicle.net == null) return;
+            
+            // Check if this vehicle belongs to a drive-by event using fast lookup
+            if (!_driveByVehicles.Contains(vehicle.net.ID.Value)) return;
+            
+            // Check the collided object
+            var collidedEntity = collision?.gameObject?.GetComponentInParent<BaseEntity>();
+            if (collidedEntity != null && IsDestructibleResource(collidedEntity))
+            {
+                collidedEntity.Kill(BaseNetworkable.DestroyMode.Gib);
+            }
+        }
+        
+        // Detect when vehicle hits something and destroy natural resources
+        private void OnVehicleHit(BaseVehicle vehicle, HitInfo info)
+        {
+            if (vehicle == null || vehicle.net == null) return;
+            
+            // Check if this is our drive-by vehicle
+            if (!_driveByVehicles.Contains(vehicle.net.ID.Value)) return;
+            
+            // Check what was hit
+            var hitEntity = info?.HitEntity as BaseEntity;
+            if (hitEntity != null && IsDestructibleResource(hitEntity))
+            {
+                hitEntity.Kill(BaseNetworkable.DestroyMode.Gib);
+            }
+        }
+        
+        // Check if an entity is a natural resource that can be destroyed
+        private bool IsDestructibleResource(BaseEntity entity)
+        {
+            if (entity == null || entity.IsDestroyed) return false;
+            
+            string prefabName = entity.ShortPrefabName?.ToLower() ?? "";
+            string fullPrefabName = entity.PrefabName?.ToLower() ?? "";
+            
+            // NEVER destroy player-placed items
+            if (entity.OwnerID != 0) return false;
+            
+            // Check if it's a tree
+            if (entity is TreeEntity) return true;
+            
+            // Check if it's an ore node
+            if (entity is OreResourceEntity) return true;
+            
+            // Check if it's a collectable
+            if (entity is CollectibleEntity) return true;
+            
+            // Check if it's a resource entity (hemp, stone, etc.)
+            if (entity is ResourceEntity) return true;
+            
+            // Check if it matches any known destructible prefabs
+            foreach (var pattern in _destructiblePrefabs)
+            {
+                if (prefabName.Contains(pattern) || fullPrefabName.Contains(pattern))
+                {
+                    return true;
+                }
+            }
+            
+            // Spawned loot containers/barrels only
+            if (entity is LootContainer) return true;
+            
+            return false;
         }
 
         private void OnEntityDeath(BaseCombatEntity entity, HitInfo info)
@@ -356,6 +459,12 @@ namespace Oxide.Plugins
                     LastShootTime = 0f,
                     LastShooterIndex = 0
                 };
+                
+                // Track this vehicle for collision handling
+                if (vehicle.net != null)
+                {
+                    _driveByVehicles.Add(vehicle.net.ID.Value);
+                }
 
                 // Spawn 3 NPCs and mount them properly
                 // We need to mount them AFTER vehicle is ready
@@ -793,6 +902,8 @@ namespace Oxide.Plugins
                 ? Convert.ToSingle(settings["Dismount Distance"]) : 15f;
             float chaseDist = settings != null && settings.ContainsKey("Chase Distance") 
                 ? Convert.ToSingle(settings["Chase Distance"]) : 40f;
+            float escapeDist = settings != null && settings.ContainsKey("Escape Distance") 
+                ? Convert.ToSingle(settings["Escape Distance"]) : 150f;
             float shootDuration = settings != null && settings.ContainsKey("Shoot Duration (Seconds)") 
                 ? Convert.ToSingle(settings["Shoot Duration (Seconds)"]) : 10f;
             float maxSpeed = settings != null && settings.ContainsKey("Vehicle Speed") 
@@ -816,6 +927,27 @@ namespace Oxide.Plugins
                 BasePlayer target = BasePlayer.FindByID(ev.TargetID);
                 if (target != null && target.IsAlive())
                     ev.TargetPosition = target.transform.position;
+                
+                // Calculate distance to target for escape check
+                Vector3 eventCenter = ev.Vehicle != null && !ev.Vehicle.IsDestroyed 
+                    ? ev.Vehicle.transform.position 
+                    : (ev.Shooters.FirstOrDefault(s => s != null && !s.IsDestroyed)?.transform.position ?? ev.SpawnPosition);
+                float distToTarget = Vector3.Distance(eventCenter, ev.TargetPosition);
+                
+                // ESCAPE CHECK - If player gets too far away, despawn the entire event
+                if (distToTarget > escapeDist)
+                {
+                    Puts($"[DriveBy] Player escaped! Distance: {distToTarget:F1}m > {escapeDist}m. Despawning event.");
+                    CleanUpEvent(ev, true);
+                    _activeEvents.RemoveAt(i);
+                    
+                    // Notify the player
+                    if (target != null)
+                    {
+                        target.ChatMessage("<color=#44ff44>[ESCAPE]</color> You got away from the drive-by!");
+                    }
+                    continue;
+                }
                 
                 // If vehicle was destroyed, just let NPCs fight
                 if (ev.VehicleDestroyed || ev.Vehicle == null || ev.Vehicle.IsDestroyed)
@@ -1238,37 +1370,44 @@ namespace Oxide.Plugins
                 // Normal driving - no water concerns
                 float absAngle = Mathf.Abs(angle);
                 
+                // CONTINUOUS STEERING - Keep turning until facing the player
+                // Steering is HELD at full lock while angle is significant
+                
                 // Only reverse when TRULY facing the wrong way (170+ degrees)
                 if (absAngle > 170f)
                 {
                     // Almost completely backwards - do a 3-point turn
                     throttle = -0.8f;
                     shouldReverse = true;
-                    steering = angle > 0 ? -0.8f : 0.8f;
+                    steering = angle > 0 ? -1f : 1f;  // Full lock while reversing
                 }
-                else if (absAngle > 120f)
+                else if (absAngle > 90f)
                 {
-                    // Very wrong direction - slow turn, no reverse
-                    throttle = 0.3f;
-                    steering = angle > 0 ? 1f : -1f;
+                    // Very wrong direction - FULL LOCK turn until facing target
+                    throttle = 0.35f;  // Slow forward
+                    steering = angle > 0 ? 1f : -1f;  // FULL LOCK - held continuously
                 }
-                else if (absAngle > 70f)
+                else if (absAngle > 60f)
                 {
+                    // Still need significant turn - keep full lock
                     throttle = 0.5f;
-                    steering = angle > 0 ? 1f : -1f;
+                    steering = angle > 0 ? 1f : -1f;  // FULL LOCK
                 }
                 else if (absAngle > 40f)
                 {
+                    // Moderate turn needed - strong steering
                     throttle = 0.7f;
-                    steering = Mathf.Sign(angle) * 0.85f;
+                    steering = angle > 0 ? 0.95f : -0.95f;  // Strong steering
                 }
                 else if (absAngle > 20f)
                 {
+                    // Small correction
                     throttle = 0.9f;
-                    steering = angle / 25f;
+                    steering = angle / 22f;  // Proportional steering
                 }
                 else
                 {
+                    // Nearly aligned - minor adjustments
                     throttle = 1f;
                     steering = angle / 45f;
                 }
@@ -1577,6 +1716,21 @@ namespace Oxide.Plugins
         private void CleanUpEvent(DriveByEvent ev, bool killAll)
         {
             if (ev == null) return;
+            
+            // Remove vehicle tracking
+            if (ev.Vehicle != null && ev.Vehicle.net != null)
+            {
+                _driveByVehicles.Remove(ev.Vehicle.net.ID.Value);
+            }
+            
+            // Remove NPC tracking
+            foreach (var npc in ev.Shooters)
+            {
+                if (npc != null && npc.net != null)
+                {
+                    _driveByNPCs.Remove(npc.net.ID.Value);
+                }
+            }
             
             if (killAll)
             {
