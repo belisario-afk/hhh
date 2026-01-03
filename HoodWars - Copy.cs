@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("HoodWars", "Gemini", "7.9.5")]
+    [Info("HoodWars", "Gemini", "7.9.6")]
     [Description("A robust, comprehensive gang-based territory and identity system for a unique vanilla-feel Rust experience.")]
     public class HoodWars : RustPlugin
     {
@@ -36,6 +36,10 @@ namespace Oxide.Plugins
         // GangKits plugin reference for gang outfit/weapon integration
         [PluginReference]
         private Plugin GangKits;
+
+        // DriveBy plugin reference for NPC drive-by events
+        [PluginReference]
+        private Plugin DriveBy;
 
         private const string PrefabMarker = "assets/prefabs/tools/map/genericradiusmarker.prefab";
         private const string PrefabSphere = "assets/prefabs/visualization/sphere.prefab";
@@ -1383,6 +1387,10 @@ namespace Oxide.Plugins
                 case "givemykit":
                     GivePlayerGangKit(player);
                     break;
+
+                case "testdriveby":
+                    TestDriveBy(player);
+                    break;
             }
         }
 
@@ -1529,6 +1537,30 @@ namespace Oxide.Plugins
             // We simulate this by triggering the OnPlayerRespawned-like behavior
             GangKits.Call("API_GiveGangKit", player, gangName);
             SendReply(player, $"<color=#55ff55>GANG KIT:</color> Gave you your <color={hoodConfig?.HexColor ?? "#ffffff"}>{gangName}</color> kit.");
+        }
+
+        // Test DriveBy functionality via admin command
+        private void TestDriveBy(BasePlayer player)
+        {
+            if (DriveBy == null || !DriveBy.IsLoaded)
+            {
+                SendReply(player, "<color=#ff4444>ERROR:</color> DriveBy plugin is not loaded.");
+                return;
+            }
+
+            // Get the current territory the player is in
+            var hood = GetNeighborhoodAt(player.transform.position);
+            if (hood == null || hood.Type == NeighborhoodType.Neutral)
+            {
+                SendReply(player, "<color=#ffaa00>INFO:</color> Stand in a gang territory to test a drive-by. Current location: Neutral Ground");
+                return;
+            }
+
+            SendReply(player, $"<color=#ff4444>DRIVE-BY TEST:</color> Triggering drive-by in <color={hood.HexColor}>{hood.Name}</color> territory...");
+            
+            // Call the DriveBy plugin's test command functionality
+            // DriveBy has a /testdriveby chat command, but we can also call it directly
+            player.Command("chat.say", "/testdriveby");
         }
 
         // Admin command to set the TC they're looking at as the HQ TC for a gang
@@ -2148,16 +2180,25 @@ namespace Oxide.Plugins
             elements.Add(new CuiButton
             {
                 Button = { Color = gangKitsLoaded ? "0.5 0.3 0.6 1" : "0.4 0.4 0.4 1", Command = "hoodwars.admin testallkits" },
-                RectTransform = { AnchorMin = "0.02 0.05", AnchorMax = "0.48 0.13" },
-                Text = { Text = gangKitsLoaded ? "Test All Gang Kits" : "GangKits N/A", FontSize = 10, Align = TextAnchor.MiddleCenter }
+                RectTransform = { AnchorMin = "0.02 0.05", AnchorMax = "0.32 0.13" },
+                Text = { Text = gangKitsLoaded ? "Test All Gang Kits" : "GangKits N/A", FontSize = 9, Align = TextAnchor.MiddleCenter }
             }, "Content");
 
             // Give My Kit button
             elements.Add(new CuiButton
             {
                 Button = { Color = gangKitsLoaded ? "0.3 0.5 0.6 1" : "0.4 0.4 0.4 1", Command = "hoodwars.admin givemykit" },
-                RectTransform = { AnchorMin = "0.52 0.05", AnchorMax = "0.98 0.13" },
-                Text = { Text = gangKitsLoaded ? "Give My Gang Kit" : "GangKits N/A", FontSize = 10, Align = TextAnchor.MiddleCenter }
+                RectTransform = { AnchorMin = "0.34 0.05", AnchorMax = "0.64 0.13" },
+                Text = { Text = gangKitsLoaded ? "Give My Gang Kit" : "GangKits N/A", FontSize = 9, Align = TextAnchor.MiddleCenter }
+            }, "Content");
+
+            // DriveBy test button (if DriveBy plugin is loaded)
+            bool driveByLoaded = DriveBy != null && DriveBy.IsLoaded;
+            elements.Add(new CuiButton
+            {
+                Button = { Color = driveByLoaded ? "0.6 0.3 0.3 1" : "0.4 0.4 0.4 1", Command = "hoodwars.admin testdriveby" },
+                RectTransform = { AnchorMin = "0.66 0.05", AnchorMax = "0.98 0.13" },
+                Text = { Text = driveByLoaded ? "Test Drive-By" : "DriveBy N/A", FontSize = 9, Align = TextAnchor.MiddleCenter }
             }, "Content");
         }
 
@@ -2641,6 +2682,22 @@ namespace Oxide.Plugins
             
             var hoodConfig = GetNeighborhoodConfig(playerInfo.HomeHood);
             return hoodConfig?.Name ?? "Neutral";
+        }
+
+        // API method to get neighborhood name at position (used by DriveBy)
+        // This returns the quadrant-based territory name, not HQ zone
+        private string GetNeighborhoodNameAt(Vector3 position)
+        {
+            if (_config == null || _config.Neighborhoods == null) return "Neutral";
+            
+            var hood = GetNeighborhoodAt(position);
+            return hood?.Name ?? "Neutral";
+        }
+
+        // API wrapper for external plugins to get player gang name
+        private string API_GetPlayerGangName(ulong playerId)
+        {
+            return GetPlayerGangName(playerId);
         }
 
         #endregion
