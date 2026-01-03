@@ -672,12 +672,6 @@ namespace Oxide.Plugins
             if (npc.Brain != null)
             {
                 npc.Brain.SetEnabled(true);
-                
-                // Make sure senses are working
-                if (npc.Brain.Senses != null)
-                {
-                    npc.Brain.Senses.Init();
-                }
             }
             
             // Configure NPC for combat
