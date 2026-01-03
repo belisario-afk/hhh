@@ -7,8 +7,8 @@ using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "1.7.0")]
-    [Description("Premium AI drive-bys: drive-by shooting, chase mode, U-turn, return, then dismount attack.")]
+    [Info("DriveBy", "Gemini", "1.8.0")]
+    [Description("Premium AI drive-bys: drive-by shooting, chase mode, U-turn, return, then dismount attack. Improved steering and alternating fire.")]
     public class DriveBy : RustPlugin
     {
         [PluginReference]
@@ -41,6 +41,7 @@ namespace Oxide.Plugins
             public float PhaseTimer;
             public float StuckTimer;            // Time when vehicle got stuck
             public float LastShootTime;         // For periodic shooting
+            public int LastShooterIndex;         // For alternating fire between NPCs
             public bool VehicleDestroyed = false;
             public bool FirstPassComplete = false;
         }
@@ -74,6 +75,9 @@ namespace Oxide.Plugins
                 ["Dismount Distance"] = 15f,         // How close to stop for dismount
                 ["Chase Distance"] = 40f,            // If player moves this far, chase them
                 ["Shoot Duration (Seconds)"] = 10f,
+                ["Min Shoot Distance"] = 10f,         // Minimum distance to shoot
+                ["Max Shoot Distance"] = 60f,         // Maximum distance to shoot
+                ["Shoot Interval"] = 0.6f,            // Seconds between each NPC shot (alternating fire)
                 ["Spawn Distance From Border"] = 100f,
                 ["Vehicle Speed"] = 15f,             // Max vehicle speed
                 ["Stuck Recovery Time"] = 2f         // Seconds before attempting stuck recovery
@@ -284,7 +288,8 @@ namespace Oxide.Plugins
                     Phase = DriveByPhase.FirstPass,
                     PhaseTimer = Time.realtimeSinceStartup,
                     StuckTimer = 0f,
-                    LastShootTime = 0f
+                    LastShootTime = 0f,
+                    LastShooterIndex = 0
                 };
 
                 // Spawn 3 NPCs and mount them properly
@@ -654,6 +659,13 @@ namespace Oxide.Plugins
                 {
                     case DriveByPhase.FirstPass:
                         // Drive past the target (drive-by shooting)
+                        // Update UTurn point to track player movement
+                        var firstPassSettings = Config["Settings"] as Dictionary<string, object>;
+                        float passDistance = firstPassSettings != null && firstPassSettings.ContainsKey("Drive-By Pass Distance") 
+                            ? Convert.ToSingle(firstPassSettings["Drive-By Pass Distance"]) : 80f;
+                        Vector3 dirToTarget = (ev.TargetPosition - ev.SpawnPosition).normalized;
+                        ev.UTurnPoint = ev.TargetPosition + dirToTarget * passDistance;
+                        
                         DriveVehicle(ev, ev.UTurnPoint, maxSpeed);
                         UpdateNPCTargets(ev);
                         
@@ -667,13 +679,13 @@ namespace Oxide.Plugins
                         break;
                         
                     case DriveByPhase.UTurn:
-                        // Slow down and turn around
-                        DriveVehicle(ev, ev.TargetPosition, maxSpeed * 0.5f);
+                        // Slow down and turn around - keep targeting player's current position
+                        DriveVehicle(ev, ev.TargetPosition, maxSpeed * 0.6f);
                         
                         // Check if facing back towards target
                         Vector3 toTarget = (ev.TargetPosition - ev.Vehicle.transform.position).normalized;
                         float dotProduct = Vector3.Dot(ev.Vehicle.transform.forward, toTarget);
-                        if (dotProduct > 0.7f || Time.realtimeSinceStartup - ev.PhaseTimer > 5f)
+                        if (dotProduct > 0.6f || Time.realtimeSinceStartup - ev.PhaseTimer > 4f)
                         {
                             ev.Phase = DriveByPhase.ReturnPass;
                             ev.PhaseTimer = Time.realtimeSinceStartup;
@@ -681,7 +693,7 @@ namespace Oxide.Plugins
                         break;
                         
                     case DriveByPhase.ReturnPass:
-                        // Drive back towards target
+                        // Drive back towards target - track player movement
                         DriveVehicle(ev, ev.TargetPosition, maxSpeed);
                         UpdateNPCTargets(ev);
                         
@@ -781,50 +793,64 @@ namespace Oxide.Plugins
         
         private void MakeNPCsShootFromVehicle(DriveByEvent ev)
         {
-            // Force NPCs to attack even while mounted
-            if (Time.realtimeSinceStartup - ev.LastShootTime < 0.5f) return;
+            var settings = Config["Settings"] as Dictionary<string, object>;
+            float minShootDist = settings != null && settings.ContainsKey("Min Shoot Distance") 
+                ? Convert.ToSingle(settings["Min Shoot Distance"]) : 10f;
+            float maxShootDist = settings != null && settings.ContainsKey("Max Shoot Distance") 
+                ? Convert.ToSingle(settings["Max Shoot Distance"]) : 60f;
+            float shootInterval = settings != null && settings.ContainsKey("Shoot Interval") 
+                ? Convert.ToSingle(settings["Shoot Interval"]) : 0.6f;
+            
+            // Alternating fire - only one NPC shoots at a time
+            if (Time.realtimeSinceStartup - ev.LastShootTime < shootInterval) return;
             ev.LastShootTime = Time.realtimeSinceStartup;
             
             BasePlayer target = BasePlayer.FindByID(ev.TargetID);
             if (target == null || !target.IsAlive()) return;
             
+            // Get list of valid shooters (non-driver, alive NPCs)
+            var validShooters = new List<ScientistNPC>();
             foreach (var npc in ev.Shooters)
             {
                 if (npc == null || npc.IsDestroyed) continue;
-                
-                // Check if NPC can see target
-                float distToTarget = Vector3.Distance(npc.transform.position, target.transform.position);
-                if (distToTarget > 80f) continue; // Too far
-                
-                // Check line of sight
-                Vector3 npcEyes = npc.eyes?.position ?? (npc.transform.position + Vector3.up * 1.5f);
-                Vector3 targetPos = target.transform.position + Vector3.up * 1f;
-                
-                if (Physics.Linecast(npcEyes, targetPos, LayerMask.GetMask("World", "Construction", "Terrain")))
-                    continue; // Blocked
-                
-                // Face the target
-                Vector3 lookDir = (target.transform.position - npc.transform.position).normalized;
-                npc.SetAimDirection(lookDir);
-                
-                // Trigger attack
-                var heldEntity = npc.GetHeldEntity() as BaseProjectile;
-                if (heldEntity != null && heldEntity.primaryMagazine.contents > 0)
-                {
-                    // Fire the weapon
-                    npc.SignalBroadcast(BaseEntity.Signal.Attack, string.Empty);
-                    
-                    // Manually trigger a shot if needed
-                    if (heldEntity.primaryMagazine.contents > 0)
-                    {
-                        heldEntity.ServerUse();
-                    }
-                }
-                else if (heldEntity != null && heldEntity.primaryMagazine.contents == 0)
-                {
-                    // Reload
-                    heldEntity.primaryMagazine.contents = heldEntity.primaryMagazine.capacity;
-                }
+                // Skip driver (index 0)
+                if (ev.Shooters.IndexOf(npc) == 0) continue;
+                validShooters.Add(npc);
+            }
+            
+            if (validShooters.Count == 0) return;
+            
+            // Cycle through shooters (alternating fire)
+            ev.LastShooterIndex = (ev.LastShooterIndex + 1) % validShooters.Count;
+            var shooter = validShooters[ev.LastShooterIndex];
+            
+            // Check distance to target
+            float distToTarget = Vector3.Distance(shooter.transform.position, target.transform.position);
+            if (distToTarget < minShootDist || distToTarget > maxShootDist) return;
+            
+            // Check line of sight
+            Vector3 npcEyes = shooter.eyes?.position ?? (shooter.transform.position + Vector3.up * 1.5f);
+            Vector3 targetPos = target.transform.position + Vector3.up * 1f;
+            
+            if (Physics.Linecast(npcEyes, targetPos, LayerMask.GetMask("World", "Construction", "Terrain")))
+                return; // Blocked
+            
+            // Face the target
+            Vector3 lookDir = (target.transform.position - shooter.transform.position).normalized;
+            shooter.SetAimDirection(lookDir);
+            
+            // Trigger attack
+            var heldEntity = shooter.GetHeldEntity() as BaseProjectile;
+            if (heldEntity != null && heldEntity.primaryMagazine.contents > 0)
+            {
+                // Fire the weapon
+                shooter.SignalBroadcast(BaseEntity.Signal.Attack, string.Empty);
+                heldEntity.ServerUse();
+            }
+            else if (heldEntity != null && heldEntity.primaryMagazine.contents == 0)
+            {
+                // Reload
+                heldEntity.primaryMagazine.contents = heldEntity.primaryMagazine.capacity;
             }
         }
         
@@ -861,29 +887,37 @@ namespace Oxide.Plugins
         {
             if (ev.Vehicle == null) return;
             
-            Vector3 toTarget = destination - ev.Vehicle.transform.position;
+            Vector3 vehiclePos = ev.Vehicle.transform.position;
+            Vector3 toTarget = destination - vehiclePos;
             toTarget.y = 0;
             
             if (toTarget.magnitude < 5f) return;
             
-            // Calculate steering
+            // Calculate steering - improved steering for better turns
             Vector3 forward = ev.Vehicle.transform.forward;
             forward.y = 0;
             float angle = Vector3.SignedAngle(forward, toTarget.normalized, Vector3.up);
             
-            // Apply throttle and steering via vehicle physics
+            // Calculate throttle and steering
             float throttle = 1f;
-            float steering = Mathf.Clamp(angle / 45f, -1f, 1f);
+            float steering = Mathf.Clamp(angle / 30f, -1f, 1f); // More responsive steering (was /45f)
             
-            // Reduce speed on turns
-            if (Mathf.Abs(angle) > 30f)
-                throttle = 0.5f;
-            
-            // Check for obstacles/steep terrain ahead
-            if (ShouldAvoidAhead(ev.Vehicle.transform.position, forward))
+            // For sharp turns, reduce speed and increase steering
+            if (Mathf.Abs(angle) > 45f)
             {
                 throttle = 0.3f;
-                steering = angle > 0 ? -0.8f : 0.8f; // Turn away
+                steering = angle > 0 ? 1f : -1f; // Full lock steering for sharp turns
+            }
+            else if (Mathf.Abs(angle) > 25f)
+            {
+                throttle = 0.6f;
+            }
+            
+            // Check for obstacles/steep terrain ahead
+            if (ShouldAvoidAhead(vehiclePos, forward))
+            {
+                throttle = 0.2f;
+                steering = angle > 0 ? -1f : 1f; // Turn away
             }
             
             // Apply inputs to BasicCar
@@ -893,15 +927,22 @@ namespace Oxide.Plugins
             var rb = ev.Vehicle.GetComponent<Rigidbody>();
             if (rb != null)
             {
-                // Apply force for movement
-                Vector3 driveForce = ev.Vehicle.transform.forward * throttle * 2000f;
+                float currentSpeed = rb.velocity.magnitude;
+                
+                // Apply forward force - stronger acceleration
+                Vector3 driveForce = ev.Vehicle.transform.forward * throttle * 3000f;
                 rb.AddForce(driveForce, ForceMode.Force);
                 
-                // Apply torque for steering
-                rb.AddTorque(Vector3.up * steering * 500f, ForceMode.Force);
+                // Apply steering torque - stronger for better turning
+                // Use more torque at lower speeds for tighter turns
+                float steeringMultiplier = currentSpeed < 5f ? 1000f : 600f;
+                rb.AddTorque(Vector3.up * steering * steeringMultiplier, ForceMode.Force);
+                
+                // Add slight downforce to prevent flipping
+                rb.AddForce(Vector3.down * 200f, ForceMode.Force);
                 
                 // Limit max speed
-                if (rb.velocity.magnitude > maxSpeed)
+                if (currentSpeed > maxSpeed)
                 {
                     rb.velocity = rb.velocity.normalized * maxSpeed;
                 }
