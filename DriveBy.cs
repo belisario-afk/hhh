@@ -7,7 +7,7 @@ using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "1.6.0")]
+    [Info("DriveBy", "Gemini", "1.6.1")]
     [Description("Premium AI drive-bys: drive-by shooting pass, U-turn, return, then dismount attack.")]
     public class DriveBy : RustPlugin
     {
@@ -206,11 +206,15 @@ namespace Oxide.Plugins
 
         private void StartDriveBy(BasePlayer target, string territoryGang)
         {
+            Puts($"[DriveBy] StartDriveBy called - target: {target?.displayName}, gang: {territoryGang}");
+            
             // Find a road/flat spawn position from territory border
             Vector3 spawnPos = GetRoadSpawnPosition(territoryGang, target.transform.position);
+            Puts($"[DriveBy] Spawn position: {spawnPos}");
+            
             if (spawnPos == Vector3.zero)
             {
-                Puts($"[DriveBy] Could not find valid road spawn for {territoryGang}");
+                Puts($"[DriveBy] ERROR: Could not find valid road spawn for {territoryGang}");
                 return;
             }
             
@@ -219,14 +223,37 @@ namespace Oxide.Plugins
             rotation.x = 0;
             rotation.z = 0;
             
-            BasicCar vehicle = GameManager.server.CreateEntity(PrefabSedan, spawnPos, rotation) as BasicCar;
-            if (vehicle == null) return;
+            Puts($"[DriveBy] Spawning sedan at {spawnPos}...");
+            var entity = GameManager.server.CreateEntity(PrefabSedan, spawnPos, rotation);
+            Puts($"[DriveBy] CreateEntity returned: {entity?.GetType().Name ?? "NULL"}");
+            
+            BasicCar vehicle = entity as BasicCar;
+            if (vehicle == null)
+            {
+                Puts($"[DriveBy] ERROR: Vehicle is null! Entity was: {entity?.GetType().Name ?? "NULL"}");
+                if (entity != null) entity.Kill();
+                return;
+            }
 
+            Puts($"[DriveBy] Calling vehicle.Spawn()...");
             vehicle.Spawn();
+            Puts($"[DriveBy] Vehicle spawned: {vehicle?.net?.ID}, IsDestroyed: {vehicle?.IsDestroyed}");
             
             // Wait a frame for vehicle to fully initialize
             NextTick(() => {
-                if (vehicle == null || vehicle.IsDestroyed) return;
+                Puts($"[DriveBy] NextTick callback - vehicle valid: {vehicle != null && !vehicle.IsDestroyed}");
+                if (vehicle == null || vehicle.IsDestroyed)
+                {
+                    Puts("[DriveBy] ERROR: Vehicle was destroyed before initialization!");
+                    return;
+                }
+                
+                Puts($"[DriveBy] Vehicle mountPoints: {vehicle.mountPoints?.Count ?? -1}");
+                if (vehicle.mountPoints == null || vehicle.mountPoints.Count < 3)
+                {
+                    Puts($"[DriveBy] ERROR: Vehicle has insufficient mount points!");
+                    return;
+                }
                 
                 // Calculate U-turn point (past target)
                 var settings = Config["Settings"] as Dictionary<string, object>;
@@ -253,13 +280,17 @@ namespace Oxide.Plugins
 
                 // Spawn 3 NPCs and mount them properly
                 // We need to mount them AFTER vehicle is ready
+                Puts($"[DriveBy] Spawning NPCs...");
                 SpawnAndMountNPC(ev, vehicle, 0, true);   // Driver
                 SpawnAndMountNPC(ev, vehicle, 1, false);  // Shooter 1
                 SpawnAndMountNPC(ev, vehicle, 2, false);  // Shooter 2
+                
+                Puts($"[DriveBy] NPCs created: {ev.Shooters.Count}");
 
                 _activeEvents.Add(ev);
                 SetCooldown(target.userID);
                 
+                Puts($"[DriveBy] Drive-by event started successfully! Active events: {_activeEvents.Count}");
                 PrintToChat($"<color=#ff4444>[STREET NEWS]</color> Drive-by in progress in {territoryGang} territory!");
             });
         }
@@ -369,19 +400,43 @@ namespace Oxide.Plugins
 
         private void SpawnAndMountNPC(DriveByEvent ev, BasicCar vehicle, int seatIndex, bool isDriver)
         {
-            if (vehicle == null || vehicle.IsDestroyed) return;
-            if (vehicle.mountPoints == null || seatIndex >= vehicle.mountPoints.Count) return;
+            Puts($"[DriveBy] SpawnAndMountNPC: seatIndex={seatIndex}, isDriver={isDriver}");
+            
+            if (vehicle == null || vehicle.IsDestroyed)
+            {
+                Puts($"[DriveBy] ERROR: Vehicle is null/destroyed in SpawnAndMountNPC");
+                return;
+            }
+            if (vehicle.mountPoints == null || seatIndex >= vehicle.mountPoints.Count)
+            {
+                Puts($"[DriveBy] ERROR: Invalid mount point index {seatIndex} (total: {vehicle.mountPoints?.Count ?? 0})");
+                return;
+            }
             
             var mountPoint = vehicle.mountPoints[seatIndex];
-            if (mountPoint?.mountable == null) return;
+            if (mountPoint?.mountable == null)
+            {
+                Puts($"[DriveBy] ERROR: Mount point {seatIndex} has no mountable");
+                return;
+            }
             
             // Spawn NPC directly at the mount point position
             Vector3 mountPos = mountPoint.mountable.transform.position;
+            Puts($"[DriveBy] Creating NPC at {mountPos}...");
             
-            ScientistNPC npc = GameManager.server.CreateEntity(PrefabScientist, mountPos, vehicle.transform.rotation) as ScientistNPC;
-            if (npc == null) return;
+            var npcEntity = GameManager.server.CreateEntity(PrefabScientist, mountPos, vehicle.transform.rotation);
+            Puts($"[DriveBy] CreateEntity returned: {npcEntity?.GetType().Name ?? "NULL"}");
+            
+            ScientistNPC npc = npcEntity as ScientistNPC;
+            if (npc == null)
+            {
+                Puts($"[DriveBy] ERROR: NPC is null! Entity was: {npcEntity?.GetType().Name ?? "NULL"}");
+                if (npcEntity != null) npcEntity.Kill();
+                return;
+            }
 
             npc.Spawn();
+            Puts($"[DriveBy] NPC spawned: {npc.net?.ID}");
             npc.inventory.Strip();
 
             // Dress NPC in gang colors
@@ -760,16 +815,25 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (HoodWars == null) { SendReply(player, "HoodWars not loaded."); return; }
+            Puts($"[DriveBy] CmdTestDriveBy called by {player.displayName}");
+            
+            if (HoodWars == null)
+            {
+                SendReply(player, "HoodWars not loaded.");
+                Puts("[DriveBy] ERROR: HoodWars plugin not loaded!");
+                return;
+            }
 
             string currentZone = HoodWars.Call<string>("GetNeighborhoodNameAt", player.transform.position) ?? "Neutral";
+            Puts($"[DriveBy] Player zone: {currentZone}");
+            
             if (currentZone == "Neutral")
             {
                 SendReply(player, "Stand in a gang territory to test.");
                 return;
             }
 
-            SendReply(player, $"Triggering {currentZone} test drive-by...");
+            SendReply(player, $"Triggering {currentZone} test drive-by at your position...");
             StartDriveBy(player, currentZone);
         }
 
