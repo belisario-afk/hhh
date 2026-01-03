@@ -987,9 +987,18 @@ namespace Oxide.Plugins
                             mountPoint.mountable.MountPlayer(npc);
                             
                             // All NPCs should be able to shoot while mounted
-                            npc.Brain.SetEnabled(true);
-                            npc.SetFact(BaseNpc.Facts.IsAggro, 1);
-                            npc.SetFact(BaseNpc.Facts.HasEnemy, 1);
+                            if (npc.Brain != null)
+                            {
+                                npc.Brain.SetEnabled(true);
+                                
+                                // Set target using Brain's memory system
+                                BasePlayer target = BasePlayer.FindByID(ev.TargetID);
+                                if (target != null && npc.Brain.Senses?.Memory != null)
+                                {
+                                    npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
+                                }
+                            }
+                            npc.SetPlayerFlag(BasePlayer.PlayerFlags.Relaxed, false);
                         }
                     }
                 }
