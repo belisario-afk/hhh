@@ -229,9 +229,14 @@ namespace Oxide.Plugins
             }
             
             Vector3 exitPos = GetExitPosition(territoryGang, target.transform.position);
-            Quaternion rotation = Quaternion.LookRotation((target.transform.position - spawnPos).normalized);
-            rotation.x = 0;
-            rotation.z = 0;
+            // Face towards the target (flat rotation on Y axis only)
+            Vector3 dirToTarget = (target.transform.position - spawnPos);
+            dirToTarget.y = 0;
+            dirToTarget.Normalize();
+            Quaternion rotation = Quaternion.LookRotation(dirToTarget);
+            
+            Puts($"[DriveBy] Spawn facing direction: {dirToTarget}, angle to target: {Vector3.Angle(dirToTarget, Vector3.forward)}");
+            Puts($"[DriveBy] Target at {target.transform.position}, spawn at {spawnPos}");
             
             Puts($"[DriveBy] Spawning sedan at {spawnPos}...");
             var entity = GameManager.server.CreateEntity(PrefabSedan, spawnPos, rotation);
@@ -313,7 +318,11 @@ namespace Oxide.Plugins
                         var pos = ev.Vehicle.transform.position;
                         var rb = ev.Vehicle.GetComponent<Rigidbody>();
                         float speed = rb != null ? rb.velocity.magnitude : 0f;
-                        Puts($"[DriveBy] Tick {tickCount}: Vehicle at {pos:F1}, speed={speed:F1}, phase={ev.Phase}, NPCs alive={ev.Shooters.Count(s => s != null && !s.IsDestroyed)}");
+                        Vector3 fwd = ev.Vehicle.transform.forward;
+                        Vector3 toTarget = (ev.TargetPosition - pos).normalized;
+                        float angle = Vector3.SignedAngle(fwd, toTarget, Vector3.up);
+                        float distToTarget = Vector3.Distance(pos, ev.TargetPosition);
+                        Puts($"[DriveBy] Tick {tickCount}: pos={pos:F1}, speed={speed:F1}, phase={ev.Phase}, angleToTarget={angle:F1}°, distToTarget={distToTarget:F1}m");
                     }
                     else
                     {
@@ -900,28 +909,37 @@ namespace Oxide.Plugins
             
             // Calculate throttle and steering
             float throttle = 1f;
-            float steering = Mathf.Clamp(angle / 30f, -1f, 1f); // More responsive steering (was /45f)
+            float steering = Mathf.Clamp(angle / 30f, -1f, 1f);
+            bool shouldReverse = false;
             
-            // For sharp turns, reduce speed and increase steering
-            if (Mathf.Abs(angle) > 45f)
+            // If facing away from target (more than 120 degrees off), reverse while turning
+            if (Mathf.Abs(angle) > 120f)
+            {
+                throttle = -0.6f; // Reverse
+                shouldReverse = true;
+                // Invert steering when reversing to turn correctly
+                steering = angle > 0 ? -1f : 1f;
+            }
+            // For sharp turns (45-120 degrees), slow down and turn hard
+            else if (Mathf.Abs(angle) > 45f)
             {
                 throttle = 0.3f;
-                steering = angle > 0 ? 1f : -1f; // Full lock steering for sharp turns
+                steering = angle > 0 ? 1f : -1f; // Full lock steering
             }
             else if (Mathf.Abs(angle) > 25f)
             {
                 throttle = 0.6f;
             }
             
-            // Check for obstacles/steep terrain ahead
-            if (ShouldAvoidAhead(vehiclePos, forward))
+            // Check for obstacles/steep terrain ahead (only if going forward)
+            if (!shouldReverse && ShouldAvoidAhead(vehiclePos, forward))
             {
                 throttle = 0.2f;
                 steering = angle > 0 ? -1f : 1f; // Turn away
             }
             
             // Apply inputs to BasicCar
-            ev.Vehicle.SetFlag(BaseEntity.Flags.Reserved5, throttle > 0.5f); // Engine running
+            ev.Vehicle.SetFlag(BaseEntity.Flags.Reserved5, true); // Engine always running
             
             // Use physics to control car smoothly
             var rb = ev.Vehicle.GetComponent<Rigidbody>();
@@ -929,17 +947,17 @@ namespace Oxide.Plugins
             {
                 float currentSpeed = rb.velocity.magnitude;
                 
-                // Apply forward force - stronger acceleration
-                Vector3 driveForce = ev.Vehicle.transform.forward * throttle * 3000f;
+                // Apply forward/reverse force
+                Vector3 driveForce = ev.Vehicle.transform.forward * throttle * 3500f;
                 rb.AddForce(driveForce, ForceMode.Force);
                 
                 // Apply steering torque - stronger for better turning
                 // Use more torque at lower speeds for tighter turns
-                float steeringMultiplier = currentSpeed < 5f ? 1000f : 600f;
+                float steeringMultiplier = currentSpeed < 5f ? 1200f : 800f;
                 rb.AddTorque(Vector3.up * steering * steeringMultiplier, ForceMode.Force);
                 
                 // Add slight downforce to prevent flipping
-                rb.AddForce(Vector3.down * 200f, ForceMode.Force);
+                rb.AddForce(Vector3.down * 300f, ForceMode.Force);
                 
                 // Limit max speed
                 if (currentSpeed > maxSpeed)
