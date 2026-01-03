@@ -7,7 +7,7 @@ using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "1.6.2")]
+    [Info("DriveBy", "Gemini", "1.6.3")]
     [Description("Premium AI drive-bys: drive-by shooting pass, U-turn, return, then dismount attack.")]
     public class DriveBy : RustPlugin
     {
@@ -290,7 +290,31 @@ namespace Oxide.Plugins
                 _activeEvents.Add(ev);
                 SetCooldown(target.userID);
                 
+                // Debug: Report vehicle position every second for 10 seconds
+                int tickCount = 0;
+                timer.Repeat(1f, 10, () => {
+                    tickCount++;
+                    if (ev.Vehicle != null && !ev.Vehicle.IsDestroyed)
+                    {
+                        var pos = ev.Vehicle.transform.position;
+                        var rb = ev.Vehicle.GetComponent<Rigidbody>();
+                        float speed = rb != null ? rb.velocity.magnitude : 0f;
+                        Puts($"[DriveBy] Tick {tickCount}: Vehicle at {pos:F1}, speed={speed:F1}, phase={ev.Phase}, NPCs alive={ev.Shooters.Count(s => s != null && !s.IsDestroyed)}");
+                    }
+                    else
+                    {
+                        Puts($"[DriveBy] Tick {tickCount}: Vehicle DESTROYED!");
+                    }
+                });
+                
                 Puts($"[DriveBy] Drive-by event started successfully! Active events: {_activeEvents.Count}");
+                
+                // Tell player the spawn position so they can teleport there if needed
+                if (target != null)
+                {
+                    target.ChatMessage($"<color=#ff4444>[DEBUG]</color> Drive-by spawned at {spawnPos:F0}. Use: teleportpos {spawnPos.x:F0} {spawnPos.y:F0} {spawnPos.z:F0}");
+                }
+                
                 PrintToChat($"<color=#ff4444>[STREET NEWS]</color> Drive-by in progress in {territoryGang} territory!");
             });
         }
@@ -308,8 +332,8 @@ namespace Oxide.Plugins
             
             float worldSize = TerrainMeta.Size.x / 2f;
             
-            // Start closer to target and search outward for valid spawn
-            for (float distFromTarget = 150f; distFromTarget <= 400f; distFromTarget += 50f)
+            // Start closer to target and search outward for valid spawn (50-150m away)
+            for (float distFromTarget = 50f; distFromTarget <= 150f; distFromTarget += 25f)
             {
                 Vector3 basePos;
                 switch (direction)
