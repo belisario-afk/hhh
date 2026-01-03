@@ -40,6 +40,7 @@ namespace Oxide.Plugins
         }
 
         private List<DriveByEvent> _activeEvents = new List<DriveByEvent>();
+        private HashSet<ulong> _driveByNPCs = new HashSet<ulong>();  // Track our NPCs for damage handling
         private Timer _eventTimer;
 
         private const string PrefabSedan = "assets/content/vehicles/sedan_a/sedantest.entity.prefab";
@@ -149,7 +150,29 @@ namespace Oxide.Plugins
         private void Unload()
         {
             _eventTimer?.Destroy();
+            _driveByNPCs.Clear();
             foreach (var ev in _activeEvents) CleanUpEvent(ev, true);
+        }
+        
+        // API: Check if an NPC is a DriveBy NPC (for other plugins like HoodWars)
+        private bool API_IsDriveByNPC(ulong netId)
+        {
+            return _driveByNPCs.Contains(netId);
+        }
+        
+        // Hook to ensure DriveBy NPCs can take damage
+        private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
+        {
+            // Check if this is one of our DriveBy NPCs
+            if (entity is ScientistNPC npc && npc.net != null && _driveByNPCs.Contains(npc.net.ID.Value))
+            {
+                // Allow damage to our NPCs - return null to let damage through
+                // Log for debugging
+                float damage = info?.damageTypes?.Total() ?? 0f;
+                Puts($"[DriveBy] NPC {npc.net.ID} taking {damage:F1} damage from {info?.Initiator?.GetType().Name ?? "unknown"}");
+                return null;
+            }
+            return null;
         }
 
         private void OnEntityDeath(BaseCombatEntity entity, HitInfo info)
@@ -157,6 +180,12 @@ namespace Oxide.Plugins
             // Check if a drive-by NPC died
             var npc = entity as ScientistNPC;
             if (npc == null) return;
+            
+            // Remove from tracking
+            if (npc.net != null)
+            {
+                _driveByNPCs.Remove(npc.net.ID.Value);
+            }
             
             foreach (var ev in _activeEvents)
             {
@@ -502,9 +531,17 @@ namespace Oxide.Plugins
             npc.Spawn();
             Puts($"[DriveBy] NPC spawned: {npc.net?.ID}");
             
-            // Make sure NPC can take damage
+            // Track this NPC as a DriveBy NPC (for damage handling)
+            if (npc.net != null)
+            {
+                _driveByNPCs.Add(npc.net.ID.Value);
+            }
+            
+            // Make sure NPC can take damage - set health properly
             npc.InitializeHealth(150f, 150f);  // Health/MaxHealth
             npc.startHealth = 150f;
+            npc.SetMaxHealth(150f);
+            npc.SetHealth(150f);
             
             npc.inventory.Strip();
 
@@ -575,15 +612,42 @@ namespace Oxide.Plugins
             {
                 navAgent.enabled = true;
                 navAgent.Warp(npc.transform.position);
+                navAgent.stoppingDistance = 2f;  // Get close to target
+                navAgent.speed = 5f;  // Run speed
             }
             
-            npc.Brain.SetEnabled(true);
+            // Enable brain for AI behavior
+            if (npc.Brain != null)
+            {
+                npc.Brain.SetEnabled(true);
+                
+                // Set aggressive state
+                npc.Brain.Navigator.SetDestination(ev.TargetPosition, BaseNavigator.NavigationSpeed.Fast);
+            }
             
-            // Set target
+            // Make NPC aggressive
+            npc.SetPlayerFlag(BasePlayer.PlayerFlags.Relaxed, false);
+            
+            // Set target in memory
             BasePlayer target = BasePlayer.FindByID(ev.TargetID);
             if (target != null && target.IsAlive())
             {
-                npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
+                if (npc.Brain?.Senses?.Memory != null)
+                {
+                    npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
+                }
+                
+                // Also set as current threat/target
+                if (npc.Brain?.Events?.Memory?.Entity != null)
+                {
+                    npc.Brain.Events.Memory.Entity.Set(target, 0);
+                }
+                
+                // Set destination to chase target
+                if (npc.Brain?.Navigator != null)
+                {
+                    npc.Brain.Navigator.SetDestination(target.transform.position, BaseNavigator.NavigationSpeed.Fast);
+                }
             }
         }
 
@@ -985,7 +1049,17 @@ namespace Oxide.Plugins
                 // Update targets for both mounted (drive-by) and dismounted (on-foot) NPCs
                 if (npc != null && !npc.IsDestroyed && target != null && target.IsAlive())
                 {
-                    npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
+                    // Update memory
+                    if (npc.Brain?.Senses?.Memory != null)
+                    {
+                        npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
+                    }
+                    
+                    // If dismounted (not in vehicle), actively chase the target
+                    if (!npc.IsMounted() && npc.Brain?.Navigator != null)
+                    {
+                        npc.Brain.Navigator.SetDestination(target.transform.position, BaseNavigator.NavigationSpeed.Fast);
+                    }
                 }
             }
         }

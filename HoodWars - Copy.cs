@@ -489,6 +489,23 @@ namespace Oxide.Plugins
                     // API not available or returned unexpected type - continue with HoodWars logic
                 }
             }
+            
+            // Allow damage to DriveBy NPCs (they should always be damageable)
+            if (DriveBy != null && entity.net != null && entity is ScientistNPC)
+            {
+                try
+                {
+                    var result = DriveBy.Call("API_IsDriveByNPC", entity.net.ID.Value);
+                    if (result != null && (bool)result)
+                    {
+                        return null;  // Allow damage to DriveBy NPCs
+                    }
+                }
+                catch
+                {
+                    // API not available - continue with normal logic
+                }
+            }
 
             // Check if entity is in an HQ safezone
             var hqHood = GetHQAtPosition(entity.transform.position);
