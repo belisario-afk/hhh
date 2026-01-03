@@ -7,8 +7,8 @@ using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "2.0.4")]
-    [Description("Premium AI drive-bys: Smart driving with complex turns, aggressive chase mode, obstacle avoidance, and proper ground combat.")]
+    [Info("DriveBy", "Gemini", "2.0.5")]
+    [Description("Premium AI drive-bys: Improved hill climbing, stable driving, proper damage, and authentic NPC movement.")]
     public class DriveBy : RustPlugin
     {
         [PluginReference]
@@ -160,19 +160,28 @@ namespace Oxide.Plugins
             return _driveByNPCs.Contains(netId);
         }
         
-        // Hook to ensure DriveBy NPCs can take damage
-        private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
+        // Hook to ensure DriveBy NPCs can take damage - MUST return null to not block
+        private void OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
         {
             // Check if this is one of our DriveBy NPCs
             if (entity is ScientistNPC npc && npc.net != null && _driveByNPCs.Contains(npc.net.ID.Value))
             {
-                // Allow damage to our NPCs - return null to let damage through
                 // Log for debugging
                 float damage = info?.damageTypes?.Total() ?? 0f;
                 Puts($"[DriveBy] NPC {npc.net.ID} taking {damage:F1} damage from {info?.Initiator?.GetType().Name ?? "unknown"}");
-                return null;
+                
+                // Force the NPC to take damage by applying it directly if needed
+                // This ensures damage goes through even if NPC has protection
+                if (info != null && damage > 0)
+                {
+                    // Scale damage for mounted NPCs (they should take MORE damage when exposed in vehicle)
+                    if (npc.IsMounted())
+                    {
+                        info.damageTypes.ScaleAll(1.2f); // 20% more damage when in vehicle
+                    }
+                }
             }
-            return null;
+            // Don't return anything - void return means damage proceeds normally
         }
 
         private void OnEntityDeath(BaseCombatEntity entity, HitInfo info)
@@ -656,29 +665,37 @@ namespace Oxide.Plugins
                 Puts($"[DriveBy] WARNING: No NavMesh found near {pos}");
             }
             
-            // Enable NavMesh for proper movement
+            // Enable NavMesh for proper movement - configure like normal scientist
             var navAgent = npc.GetComponent<NavMeshAgent>();
             if (navAgent != null)
             {
                 navAgent.enabled = true;
                 navAgent.Warp(npc.transform.position);
-                navAgent.stoppingDistance = 3f;  // Stop 3m from target to shoot
-                navAgent.speed = 5.5f;  // Run speed
-                navAgent.acceleration = 8f;  // Quick acceleration
-                navAgent.angularSpeed = 180f;  // Fast turning
+                navAgent.stoppingDistance = 5f;  // Stop 5m from target
+                navAgent.speed = 4.5f;  // Normal run speed
+                navAgent.acceleration = 6f;  // Smooth acceleration
+                navAgent.angularSpeed = 120f;  // Normal turning
+                navAgent.autoBraking = true;
+                navAgent.autoRepath = true;  // Important for pathfinding
             }
             
-            // Enable brain for AI behavior
+            // Enable brain for proper AI behavior - let it use default states
             if (npc.Brain != null)
             {
                 npc.Brain.SetEnabled(true);
+                
+                // Configure navigator for proper movement
+                if (npc.Brain.Navigator != null)
+                {
+                    npc.Brain.Navigator.CanUseNavMesh = true;
+                    npc.Brain.Navigator.CanUseAStar = true;
+                    npc.Brain.Navigator.MaxRoamDistanceFromHome = 500f;
+                }
             }
             
-            // Configure NPC for combat
+            // Configure NPC for combat - like a normal hostile scientist
             npc.SetPlayerFlag(BasePlayer.PlayerFlags.Relaxed, false);
-            
-            // Set attack range on NPC
-            npc.damageScale = 1f;
+            npc.SetPlayerFlag(BasePlayer.PlayerFlags.DisplaySash, false);
             
             // Get target
             BasePlayer target = BasePlayer.FindByID(ev.TargetID);
@@ -686,7 +703,7 @@ namespace Oxide.Plugins
             {
                 Puts($"[DriveBy] Setting target to {target.displayName}");
                 
-                // Set target in memory
+                // Set target in memory - this makes NPC naturally hostile
                 if (npc.Brain?.Senses?.Memory != null)
                 {
                     npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
@@ -698,21 +715,21 @@ namespace Oxide.Plugins
                     npc.Brain.Events.Memory.Entity.Set(target, 0);
                 }
                 
-                // Set destination to chase target
+                // Set initial destination to chase target
                 if (npc.Brain?.Navigator != null)
                 {
-                    npc.Brain.Navigator.SetDestination(target.transform.position, BaseNavigator.NavigationSpeed.Fast);
+                    npc.Brain.Navigator.SetDestination(target.transform.position, BaseNavigator.NavigationSpeed.Normal);
                 }
             }
             
-            // Start periodic combat update for this NPC
+            // Start periodic combat update for this NPC - let brain handle most behavior
             StartCombatBehavior(npc, ev);
         }
         
         private void StartCombatBehavior(ScientistNPC npc, DriveByEvent ev)
         {
-            // Update NPC combat every 0.5 seconds until dead or event ends
-            timer.Repeat(0.5f, 0, () =>
+            // Update NPC combat every 1 second - less aggressive, let brain handle most behavior
+            timer.Repeat(1f, 0, () =>
             {
                 if (npc == null || npc.IsDestroyed || ev.Shooters == null || !ev.Shooters.Contains(npc))
                     return;
@@ -725,24 +742,29 @@ namespace Oxide.Plugins
                 
                 float distToTarget = Vector3.Distance(npc.transform.position, target.transform.position);
                 
-                // Update destination to chase target
-                if (npc.Brain?.Navigator != null)
+                // Just update the target position - let brain handle movement
+                if (npc.Brain?.Senses?.Memory != null)
                 {
-                    npc.Brain.Navigator.SetDestination(target.transform.position, BaseNavigator.NavigationSpeed.Fast);
+                    npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
                 }
                 
-                // If close enough, try to attack
-                if (distToTarget < 30f)
+                // Update destination periodically if target moved far
+                if (distToTarget > 8f && npc.Brain?.Navigator != null)
+                {
+                    npc.Brain.Navigator.SetDestination(target.transform.position, BaseNavigator.NavigationSpeed.Normal);
+                }
+                
+                // Manual shooting only when stationary and in range - let brain handle movement shooting
+                if (distToTarget < 25f && distToTarget > 3f)
                 {
                     // Face the target
                     Vector3 lookDir = (target.transform.position - npc.transform.position).normalized;
                     npc.SetAimDirection(lookDir);
                     
-                    // Try to shoot
+                    // Check if we should shoot (line of sight)
                     var heldEntity = npc.GetHeldEntity() as BaseProjectile;
                     if (heldEntity != null)
                     {
-                        // Check line of sight
                         Vector3 npcEyes = npc.eyes?.position ?? (npc.transform.position + Vector3.up * 1.5f);
                         Vector3 targetPos = target.transform.position + Vector3.up * 1f;
                         
@@ -961,59 +983,115 @@ namespace Oxide.Plugins
             var rb = ev.Vehicle.GetComponent<Rigidbody>();
             if (rb == null) return;
             
+            Vector3 vehiclePos = ev.Vehicle.transform.position;
+            Vector3 forward = ev.Vehicle.transform.forward;
+            Vector3 backward = -forward;
+            Vector3 right = ev.Vehicle.transform.right;
+            
             float stuckDuration = ev.StuckTimer > 0 ? Time.realtimeSinceStartup - ev.StuckTimer : 0f;
             
-            // Stage 1 (0-2s): Try reversing with random turn
+            // CHECK FOR WATER before any reverse maneuver!
+            bool waterBehind = IsWaterAhead(vehiclePos, backward, 10f);
+            bool waterLeft = IsWaterAhead(vehiclePos, -right, 8f);
+            bool waterRight = IsWaterAhead(vehiclePos, right, 8f);
+            bool waterAhead = IsWaterAhead(vehiclePos, forward, 10f);
+            
+            // Stage 1 (0-2s): Try turning/reversing (but NOT into water!)
             if (stuckDuration < 2f)
             {
-                rb.velocity = -ev.Vehicle.transform.forward * 8f;
-                rb.AddTorque(Vector3.up * UnityEngine.Random.Range(-400f, 400f), ForceMode.Impulse);
+                if (!waterBehind)
+                {
+                    rb.velocity = backward * 6f;
+                    float turnDir = UnityEngine.Random.value > 0.5f ? 1f : -1f;
+                    // Don't turn towards water
+                    if (turnDir > 0 && waterRight) turnDir = -1f;
+                    if (turnDir < 0 && waterLeft) turnDir = 1f;
+                    rb.AddTorque(Vector3.up * turnDir * 400f, ForceMode.Impulse);
+                }
+                else
+                {
+                    // Can't reverse - try turning in place
+                    float turnDir = !waterRight ? 1f : (!waterLeft ? -1f : 0f);
+                    rb.AddTorque(Vector3.up * turnDir * 600f, ForceMode.Impulse);
+                    if (!waterAhead)
+                    {
+                        rb.velocity = forward * 4f;
+                    }
+                }
             }
-            // Stage 2 (2-4s): More aggressive reverse + turn
+            // Stage 2 (2-4s): More aggressive turn
             else if (stuckDuration < 4f)
             {
-                rb.velocity = -ev.Vehicle.transform.forward * 10f;
-                float turnDir = UnityEngine.Random.value > 0.5f ? 1f : -1f;
-                rb.AddTorque(Vector3.up * turnDir * 600f, ForceMode.Impulse);
+                if (!waterBehind)
+                {
+                    rb.velocity = backward * 8f;
+                    float turnDir = !waterRight ? 1f : (!waterLeft ? -1f : (UnityEngine.Random.value > 0.5f ? 1f : -1f));
+                    rb.AddTorque(Vector3.up * turnDir * 600f, ForceMode.Impulse);
+                }
+                else
+                {
+                    // Still can't reverse - aggressive forward turn
+                    float turnDir = !waterRight ? 1f : (!waterLeft ? -1f : 0f);
+                    rb.AddTorque(Vector3.up * turnDir * 800f, ForceMode.Impulse);
+                    if (!waterAhead)
+                    {
+                        rb.velocity = forward * 6f;
+                    }
+                }
             }
-            // Stage 3 (4s+): Teleport to a better position
+            // Stage 3 (4s+): Teleport to a better position (NEVER into water)
             else
             {
                 // Find direction towards target
-                Vector3 toTarget = (ev.TargetPosition - ev.Vehicle.transform.position).normalized;
+                Vector3 toTarget = (ev.TargetPosition - vehiclePos).normalized;
                 
-                // Try multiple teleport positions
-                for (int i = 0; i < 5; i++)
+                // Try multiple teleport positions - prioritize away from water
+                for (int i = 0; i < 10; i++)
                 {
-                    Vector3 offset = toTarget * 10f + new Vector3(
-                        UnityEngine.Random.Range(-8f, 8f), 
+                    Vector3 offset = toTarget * 15f + new Vector3(
+                        UnityEngine.Random.Range(-10f, 10f), 
                         3f, 
-                        UnityEngine.Random.Range(-8f, 8f)
+                        UnityEngine.Random.Range(-10f, 10f)
                     );
-                    Vector3 testPos = ev.Vehicle.transform.position + offset;
+                    Vector3 testPos = vehiclePos + offset;
                     Vector3 groundPos = GetFlatGroundPosition(testPos);
                     
                     if (groundPos != Vector3.zero && !IsInWater(groundPos) && IsFlatEnough(groundPos))
                     {
-                        // Face towards target
-                        Vector3 lookDir = (ev.TargetPosition - groundPos);
-                        lookDir.y = 0;
-                        if (lookDir.magnitude > 1f)
+                        // Double-check this position isn't near water
+                        if (groundPos.y > WaterSystem.OceanLevel + 3f)
                         {
-                            ev.Vehicle.transform.rotation = Quaternion.LookRotation(lookDir.normalized);
+                            // Face towards target
+                            Vector3 lookDir = (ev.TargetPosition - groundPos);
+                            lookDir.y = 0;
+                            if (lookDir.magnitude > 1f)
+                            {
+                                ev.Vehicle.transform.rotation = Quaternion.LookRotation(lookDir.normalized);
+                            }
+                            
+                            ev.Vehicle.transform.position = groundPos;
+                            rb.velocity = Vector3.zero;
+                            rb.angularVelocity = Vector3.zero;
+                            
+                            Puts($"[DriveBy] Teleported vehicle to safe position {groundPos}");
+                            ev.StuckTimer = 0f;
+                            return;
                         }
-                        
-                        ev.Vehicle.transform.position = groundPos;
-                        rb.velocity = Vector3.zero;
-                        rb.angularVelocity = Vector3.zero;
-                        
-                        Puts($"[DriveBy] Teleported vehicle to {groundPos}");
-                        ev.StuckTimer = 0f; // Reset timer
-                        return;
                     }
                 }
                 
-                Puts($"[DriveBy] Could not find valid teleport position!");
+                Puts($"[DriveBy] Could not find valid teleport position away from water!");
+                // Last resort: teleport to target area
+                Vector3 nearTarget = ev.TargetPosition + new Vector3(UnityEngine.Random.Range(-20f, 20f), 0, UnityEngine.Random.Range(-20f, 20f));
+                Vector3 safePos = GetFlatGroundPosition(nearTarget);
+                if (safePos != Vector3.zero && safePos.y > WaterSystem.OceanLevel + 3f)
+                {
+                    ev.Vehicle.transform.position = safePos;
+                    rb.velocity = Vector3.zero;
+                    rb.angularVelocity = Vector3.zero;
+                    Puts($"[DriveBy] Emergency teleport to {safePos}");
+                    ev.StuckTimer = 0f;
+                }
             }
         }
         
@@ -1037,73 +1115,184 @@ namespace Oxide.Plugins
             right.y = 0;
             right.Normalize();
             
+            Vector3 backward = -forward;
+            
             float angle = Vector3.SignedAngle(forward, toTarget.normalized, Vector3.up);
             
             var rb = ev.Vehicle.GetComponent<Rigidbody>();
             float currentSpeed = rb != null ? rb.velocity.magnitude : 0f;
             
-            // Calculate throttle and steering with more aggressive logic
+            // Get current vehicle slope
+            RaycastHit groundHit;
+            float groundSlope = 0f;
+            bool goingUphill = false;
+            if (Physics.Raycast(vehiclePos + Vector3.up * 2f, Vector3.down, out groundHit, 10f, LayerMask.GetMask("Terrain")))
+            {
+                groundSlope = Vector3.Angle(groundHit.normal, Vector3.up);
+                // Check if we're going uphill or downhill
+                Vector3 slopeDir = Vector3.Cross(Vector3.Cross(groundHit.normal, Vector3.up), groundHit.normal);
+                goingUphill = Vector3.Dot(forward, slopeDir) < 0;
+            }
+            
+            // CRITICAL: Check for water in ALL directions
+            bool waterAhead = IsWaterAhead(vehiclePos, forward, 15f);
+            bool waterBehind = IsWaterAhead(vehiclePos, backward, 10f);
+            bool waterLeft = IsWaterAhead(vehiclePos, -right, 8f);
+            bool waterRight = IsWaterAhead(vehiclePos, right, 8f);
+            bool currentlyNearWater = vehiclePos.y < WaterSystem.OceanLevel + 3f;
+            
+            // Calculate throttle and steering with more stable logic
             float throttle = 1f;
             float steering = 0f;
             bool shouldReverse = false;
             
-            // IMPROVED STEERING: Non-linear response for better control
-            // Small angles = smooth steering, large angles = aggressive steering
-            float absAngle = Mathf.Abs(angle);
-            
-            if (absAngle > 150f)
+            // WATER AVOIDANCE - HIGHEST PRIORITY - avoid water at all costs!
+            if (waterAhead || currentlyNearWater)
             {
-                // Almost backwards - do a quick 3-point turn
-                throttle = -1f; // Full reverse
-                shouldReverse = true;
-                steering = angle > 0 ? -1f : 1f; // Full lock
+                // Water ahead or we're near water - DON'T GO FORWARD!
+                if (!waterBehind && !waterLeft && !waterRight)
+                {
+                    // Safe to reverse and turn - do a proper turn away from water
+                    shouldReverse = true;
+                    throttle = -0.7f;
+                    // Turn towards target while reversing
+                    steering = angle > 0 ? -0.9f : 0.9f;
+                    Puts($"[DriveBy] Water ahead! Reversing and turning. WaterBehind:{waterBehind}");
+                }
+                else if (!waterLeft)
+                {
+                    // Turn left (go forward but turn hard left)
+                    throttle = 0.4f;
+                    steering = -1f;
+                    Puts($"[DriveBy] Water ahead! Turning left.");
+                }
+                else if (!waterRight)
+                {
+                    // Turn right
+                    throttle = 0.4f;
+                    steering = 1f;
+                    Puts($"[DriveBy] Water ahead! Turning right.");
+                }
+                else if (!waterBehind)
+                {
+                    // Only safe direction is back - reverse straight
+                    shouldReverse = true;
+                    throttle = -0.8f;
+                    steering = 0f;
+                    Puts($"[DriveBy] Water all around except behind! Reversing.");
+                }
+                else
+                {
+                    // Surrounded by water - emergency! Try to get to higher ground
+                    // Find direction to highest nearby point
+                    Vector3 escapeDir = FindEscapeFromWater(vehiclePos);
+                    if (escapeDir != Vector3.zero)
+                    {
+                        float escapeAngle = Vector3.SignedAngle(forward, escapeDir, Vector3.up);
+                        throttle = 0.6f;
+                        steering = Mathf.Clamp(escapeAngle / 30f, -1f, 1f);
+                    }
+                    Puts($"[DriveBy] EMERGENCY: Surrounded by water!");
+                }
             }
-            else if (absAngle > 100f)
+            // NEVER reverse into water - check before any reverse maneuver
+            else if (waterBehind)
             {
-                // Very sharp turn needed - reverse and turn
-                throttle = -0.8f;
-                shouldReverse = true;
-                steering = angle > 0 ? -1f : 1f;
-            }
-            else if (absAngle > 70f)
-            {
-                // Sharp turn - slow down significantly, full steering lock
-                throttle = 0.4f;
-                steering = angle > 0 ? 1f : -1f;
-            }
-            else if (absAngle > 40f)
-            {
-                // Medium turn - moderate speed, strong steering
-                throttle = 0.7f;
-                steering = Mathf.Sign(angle) * 0.9f;
-            }
-            else if (absAngle > 20f)
-            {
-                // Light turn - good speed, proportional steering
-                throttle = 0.9f;
-                steering = angle / 25f;
+                // Water behind - NEVER REVERSE
+                shouldReverse = false;
+                
+                // IMPROVED STEERING: Smoother response, less aggressive reversing
+                float absAngle = Mathf.Abs(angle);
+                
+                // Since we can't reverse, we need to turn in place or go forward
+                if (absAngle > 120f)
+                {
+                    // Very wrong direction - but CAN'T reverse due to water
+                    // Do a tight forward turn instead
+                    throttle = 0.4f;
+                    steering = angle > 0 ? 1f : -1f;
+                }
+                else if (absAngle > 70f)
+                {
+                    throttle = 0.5f;
+                    steering = angle > 0 ? 1f : -1f;
+                }
+                else if (absAngle > 40f)
+                {
+                    throttle = 0.7f;
+                    steering = Mathf.Sign(angle) * 0.85f;
+                }
+                else if (absAngle > 20f)
+                {
+                    throttle = 0.9f;
+                    steering = angle / 25f;
+                }
+                else
+                {
+                    throttle = 1f;
+                    steering = angle / 45f;
+                }
             }
             else
             {
-                // Nearly aligned - full speed, light corrections
-                throttle = 1f;
-                steering = angle / 40f;
+                // Normal driving - no water concerns
+                float absAngle = Mathf.Abs(angle);
+                
+                // Only reverse when TRULY facing the wrong way (170+ degrees)
+                if (absAngle > 170f)
+                {
+                    // Almost completely backwards - do a 3-point turn
+                    throttle = -0.8f;
+                    shouldReverse = true;
+                    steering = angle > 0 ? -0.8f : 0.8f;
+                }
+                else if (absAngle > 120f)
+                {
+                    // Very wrong direction - slow turn, no reverse
+                    throttle = 0.3f;
+                    steering = angle > 0 ? 1f : -1f;
+                }
+                else if (absAngle > 70f)
+                {
+                    throttle = 0.5f;
+                    steering = angle > 0 ? 1f : -1f;
+                }
+                else if (absAngle > 40f)
+                {
+                    throttle = 0.7f;
+                    steering = Mathf.Sign(angle) * 0.85f;
+                }
+                else if (absAngle > 20f)
+                {
+                    throttle = 0.9f;
+                    steering = angle / 25f;
+                }
+                else
+                {
+                    throttle = 1f;
+                    steering = angle / 45f;
+                }
             }
             
-            // Speed-based steering adjustment - MORE steering at low speed, LESS at high speed
-            if (!shouldReverse && currentSpeed > 8f)
+            // UPHILL BOOST - more power when going uphill
+            if (goingUphill && groundSlope > 10f && !shouldReverse)
             {
-                steering *= 0.7f; // Reduce steering at high speed to prevent oversteer
-            }
-            else if (!shouldReverse && currentSpeed < 3f)
-            {
-                steering *= 1.3f; // More steering at low speed for tighter turns
+                throttle = Mathf.Max(throttle, 0.8f);
             }
             
-            // OBSTACLE AVOIDANCE - check multiple directions
-            if (!shouldReverse)
+            // Speed-based steering adjustment
+            if (!shouldReverse && currentSpeed > 10f)
             {
-                // Check front-left and front-right for obstacles
+                steering *= 0.6f;
+            }
+            else if (!shouldReverse && currentSpeed < 4f)
+            {
+                steering *= 1.2f;
+            }
+            
+            // OBSTACLE AVOIDANCE - but NOT if we're avoiding water (water takes priority)
+            if (!shouldReverse && !waterAhead && !currentlyNearWater)
+            {
                 bool obstacleAhead = ShouldAvoidAhead(vehiclePos, forward);
                 bool obstacleLeft = ShouldAvoidAhead(vehiclePos, (forward - right * 0.5f).normalized);
                 bool obstacleRight = ShouldAvoidAhead(vehiclePos, (forward + right * 0.5f).normalized);
@@ -1112,27 +1301,24 @@ namespace Oxide.Plugins
                 {
                     if (obstacleLeft && !obstacleRight)
                     {
-                        // Go right
-                        steering = 1f;
+                        steering = 0.9f;
                         throttle = 0.5f;
                     }
                     else if (obstacleRight && !obstacleLeft)
                     {
-                        // Go left
-                        steering = -1f;
+                        steering = -0.9f;
                         throttle = 0.5f;
                     }
                     else if (!obstacleLeft && !obstacleRight)
                     {
-                        // Turn towards target direction
-                        steering = angle > 0 ? 0.8f : -0.8f;
-                        throttle = 0.4f;
+                        steering = angle > 0 ? 0.7f : -0.7f;
+                        throttle = 0.5f;
                     }
-                    else
+                    else if (!waterBehind)
                     {
-                        // Blocked - reverse
-                        throttle = -0.8f;
-                        steering = UnityEngine.Random.value > 0.5f ? 1f : -1f;
+                        // Only reverse if no water behind
+                        throttle = -0.6f;
+                        steering = UnityEngine.Random.value > 0.5f ? 0.7f : -0.7f;
                         shouldReverse = true;
                     }
                 }
@@ -1146,36 +1332,108 @@ namespace Oxide.Plugins
             
             if (rb != null)
             {
-                // IMPROVED PHYSICS - more aggressive acceleration
-                float driveForce = shouldReverse ? 2500f : 5000f; // More power!
-                Vector3 force = ev.Vehicle.transform.forward * throttle * driveForce;
+                // IMPROVED PHYSICS - better hill climbing
+                float baseDriveForce = shouldReverse ? 2500f : 5500f;
+                
+                // Extra power for hills
+                if (goingUphill && groundSlope > 5f)
+                {
+                    baseDriveForce += groundSlope * 100f;
+                }
+                
+                Vector3 force = ev.Vehicle.transform.forward * throttle * baseDriveForce;
                 rb.AddForce(force, ForceMode.Force);
                 
-                // IMPROVED STEERING TORQUE - speed-sensitive
-                float baseTorque = 1500f;
-                float speedFactor = Mathf.Clamp01(1f - (currentSpeed / 20f)); // More torque at low speed
-                float torque = baseTorque * (0.6f + speedFactor * 0.6f);
+                // IMPROVED STEERING TORQUE - smoother, speed-sensitive
+                float baseTorque = 1200f;
+                float speedFactor = Mathf.Clamp01(1f - (currentSpeed / 25f));
+                float torque = baseTorque * (0.5f + speedFactor * 0.7f);
                 rb.AddTorque(Vector3.up * steering * torque, ForceMode.Force);
                 
-                // GRIP/DOWNFORCE - prevents flipping, improves traction
-                rb.AddForce(Vector3.down * 500f, ForceMode.Force);
+                // GRIP/DOWNFORCE
+                float downforce = 400f + (goingUphill ? groundSlope * 20f : 0f);
+                rb.AddForce(Vector3.down * downforce, ForceMode.Force);
                 
-                // LATERAL GRIP - reduce sideways sliding for better control
+                // LATERAL GRIP - reduce sideways sliding
                 Vector3 lateralVelocity = Vector3.Project(rb.velocity, right);
-                rb.AddForce(-lateralVelocity * 1.5f, ForceMode.VelocityChange);
+                rb.AddForce(-lateralVelocity * 1.2f, ForceMode.VelocityChange);
                 
-                // AGGRESSIVE SPEED - higher max speed
+                // Speed limiting
                 if (currentSpeed > maxSpeed)
                 {
                     rb.velocity = rb.velocity.normalized * maxSpeed;
                 }
                 
-                // BOOST when far from target - accelerate harder
-                if (distToTarget > 50f && absAngle < 30f && !shouldReverse)
+                // BOOST when far from target and well-aligned (and not near water)
+                if (distToTarget > 60f && Mathf.Abs(angle) < 25f && !shouldReverse && !goingUphill && !waterAhead && !currentlyNearWater)
                 {
-                    rb.AddForce(ev.Vehicle.transform.forward * 2000f, ForceMode.Force);
+                    rb.AddForce(ev.Vehicle.transform.forward * 1500f, ForceMode.Force);
                 }
             }
+        }
+        
+        // Check if there's water in a specific direction
+        private bool IsWaterAhead(Vector3 pos, Vector3 direction, float distance)
+        {
+            float waterLevel = WaterSystem.OceanLevel;
+            
+            // Check multiple points along the path
+            for (float d = 3f; d <= distance; d += 3f)
+            {
+                Vector3 checkPos = pos + direction * d;
+                checkPos.y = 500f;
+                
+                RaycastHit hit;
+                if (Physics.Raycast(checkPos, Vector3.down, out hit, 1000f, LayerMask.GetMask("Terrain")))
+                {
+                    if (hit.point.y < waterLevel + 1.5f)
+                    {
+                        return true; // Water detected!
+                    }
+                }
+                else
+                {
+                    // No terrain hit - might be off map or over water
+                    return true;
+                }
+            }
+            
+            return false;
+        }
+        
+        // Find a direction to escape from water
+        private Vector3 FindEscapeFromWater(Vector3 pos)
+        {
+            float waterLevel = WaterSystem.OceanLevel;
+            float bestHeight = pos.y;
+            Vector3 bestDir = Vector3.zero;
+            
+            // Check 8 directions
+            Vector3[] directions = {
+                Vector3.forward, Vector3.back, Vector3.left, Vector3.right,
+                (Vector3.forward + Vector3.left).normalized,
+                (Vector3.forward + Vector3.right).normalized,
+                (Vector3.back + Vector3.left).normalized,
+                (Vector3.back + Vector3.right).normalized
+            };
+            
+            foreach (var dir in directions)
+            {
+                Vector3 checkPos = pos + dir * 20f;
+                checkPos.y = 500f;
+                
+                RaycastHit hit;
+                if (Physics.Raycast(checkPos, Vector3.down, out hit, 1000f, LayerMask.GetMask("Terrain")))
+                {
+                    if (hit.point.y > bestHeight && hit.point.y > waterLevel + 2f)
+                    {
+                        bestHeight = hit.point.y;
+                        bestDir = dir;
+                    }
+                }
+            }
+            
+            return bestDir;
         }
         
         private void StopVehicle(DriveByEvent ev)
@@ -1199,15 +1457,15 @@ namespace Oxide.Plugins
             
             foreach (var heightOffset in checkHeights)
             {
-                if (Physics.Raycast(pos + heightOffset, forward, out hit, 12f, 
+                if (Physics.Raycast(pos + heightOffset, forward, out hit, 10f, 
                     LayerMask.GetMask("World", "Construction", "Deployed", "Tree")))
                 {
                     return true;
                 }
             }
             
-            // Check terrain steepness ahead at multiple distances
-            float[] checkDistances = { 5f, 10f, 15f };
+            // Check terrain steepness ahead - more permissive for hills
+            float[] checkDistances = { 6f, 12f };
             
             foreach (var dist in checkDistances)
             {
@@ -1216,11 +1474,15 @@ namespace Oxide.Plugins
                 if (Physics.Raycast(aheadPos, Vector3.down, out hit, 1000f, LayerMask.GetMask("Terrain")))
                 {
                     float angle = Vector3.Angle(hit.normal, Vector3.up);
-                    if (angle > 25f) return true; // Too steep
+                    // Allow slopes up to 35 degrees (more permissive for hills)
+                    if (angle > 35f) return true;
                     
-                    // Check for big height difference (cliff/drop)
-                    float heightDiff = Mathf.Abs(hit.point.y - pos.y);
-                    if (heightDiff > 4f) return true;
+                    // Check for big height difference (cliff/drop) - only at close range
+                    if (dist < 8f)
+                    {
+                        float heightDiff = Mathf.Abs(hit.point.y - pos.y);
+                        if (heightDiff > 6f) return true; // More permissive
+                    }
                     
                     // Check if going into water
                     if (hit.point.y < WaterSystem.OceanLevel + 1f) return true;
