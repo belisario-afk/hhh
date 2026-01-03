@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "1.3.4")]
+    [Info("DriveBy", "Gemini", "1.3.5")]
     [Description("Triggered NPC drive-bys when rivals enter enemy territory. Fully optimized for 2026 uMod API.")]
     public class DriveBy : RustPlugin
     {
@@ -159,7 +159,17 @@ namespace Oxide.Plugins
             List<object> pathPoints = spawnPoints[territoryGang] as List<object>;
             if (pathPoints == null || pathPoints.Count < 2) return;
 
-            Vector3 spawnPos = (Vector3)pathPoints[0];
+            // Parse Vector3 from config (handles both direct Vector3 and dictionary format)
+            List<Vector3> parsedPath = new List<Vector3>();
+            foreach (var point in pathPoints)
+            {
+                Vector3 vec = ParseVector3(point);
+                parsedPath.Add(vec);
+            }
+            
+            if (parsedPath.Count < 2) return;
+
+            Vector3 spawnPos = parsedPath[0];
             BaseVehicle vehicle = GameManager.server.CreateEntity(PrefabSedan, spawnPos, Quaternion.identity) as BaseVehicle;
             if (vehicle == null) return;
 
@@ -168,7 +178,7 @@ namespace Oxide.Plugins
             DriveByEvent ev = new DriveByEvent
             {
                 Vehicle = vehicle,
-                Path = pathPoints.Select(x => (Vector3)x).ToList(),
+                Path = parsedPath,
                 CurrentPathIndex = 0,
                 TargetID = target.userID,
                 GangOwner = territoryGang
@@ -306,6 +316,37 @@ namespace Oxide.Plugins
         #region Helpers
 
         private Dictionary<ulong, float> _cooldowns = new Dictionary<ulong, float>();
+
+        private Vector3 ParseVector3(object obj)
+        {
+            // If it's already a Vector3, return it
+            if (obj is Vector3) return (Vector3)obj;
+            
+            // If it's a dictionary (serialized config format)
+            if (obj is Dictionary<string, object> dict)
+            {
+                float x = dict.ContainsKey("x") ? Convert.ToSingle(dict["x"]) : 0f;
+                float y = dict.ContainsKey("y") ? Convert.ToSingle(dict["y"]) : 0f;
+                float z = dict.ContainsKey("z") ? Convert.ToSingle(dict["z"]) : 0f;
+                return new Vector3(x, y, z);
+            }
+            
+            // If it's a string like "(100, 10, 200)"
+            if (obj is string str)
+            {
+                str = str.Trim('(', ')');
+                var parts = str.Split(',');
+                if (parts.Length >= 3)
+                {
+                    float.TryParse(parts[0].Trim(), out float x);
+                    float.TryParse(parts[1].Trim(), out float y);
+                    float.TryParse(parts[2].Trim(), out float z);
+                    return new Vector3(x, y, z);
+                }
+            }
+            
+            return Vector3.zero;
+        }
 
         private bool IsOnCooldown(ulong id)
         {
