@@ -543,11 +543,16 @@ namespace Oxide.Plugins
             BasePlayer target = BasePlayer.FindByID(ev.TargetID);
             if (target != null)
             {
-                // Set the target enemy for this NPC
-                npc.SetTarget(target);
+                // Use Brain's memory system to set target
                 if (npc.Brain?.Senses?.Memory != null)
                 {
                     npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
+                }
+                
+                // Also try to set hostile target via Brain's Events if available
+                if (npc.Brain?.Events != null)
+                {
+                    npc.Brain.Events.Memory.Entity.Set(target, 0);
                 }
             }
 
