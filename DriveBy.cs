@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "1.4.0")]
+    [Info("DriveBy", "Gemini", "1.4.2")]
     [Description("Smart AI drive-bys with terrain navigation, dismount attacks. Spawns from territory borders.")]
     public class DriveBy : RustPlugin
     {
@@ -37,8 +37,8 @@ namespace Oxide.Plugins
         private List<DriveByEvent> _activeEvents = new List<DriveByEvent>();
         private Timer _eventTimer;
 
-        private const string PrefabSedan = "assets/content/vehicles/sedan_a/sedan_b.prefab";
-        private const string PrefabScientist = "assets/prefabs/npc/scientist/scientistnpc_roaming.prefab";
+        private const string PrefabSedan = "assets/content/vehicles/sedan_a/sedantest.entity.prefab";
+        private const string PrefabScientist = "assets/rust.ai/agents/npcplayer/humannpc/scientist/scientistnpc_roam.prefab";
         private const string PermAdmin = "hoodwars.admin";
         
         // Dismount settings
@@ -196,20 +196,7 @@ namespace Oxide.Plugins
 
             vehicle.Spawn();
             
-            // Fill with fuel - find fuel container and add low grade fuel
-            var fuelSystem = vehicle.GetFuelSystem();
-            if (fuelSystem != null)
-            {
-                var fuelContainer = fuelSystem.GetFuelContainer();
-                if (fuelContainer?.inventory != null)
-                {
-                    var fuelItem = ItemManager.CreateByName("lowgradefuel", 100);
-                    if (fuelItem != null && !fuelItem.MoveToContainer(fuelContainer.inventory))
-                    {
-                        fuelItem.Remove();
-                    }
-                }
-            }
+            // sedan test entity doesn't need fuel - it just works
             
             DriveByEvent ev = new DriveByEvent
             {
