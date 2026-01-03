@@ -196,8 +196,20 @@ namespace Oxide.Plugins
 
             vehicle.Spawn();
             
-            // Fill with fuel
-            vehicle.GetFuelSystem()?.AddStartingFuel(100f);
+            // Fill with fuel - find fuel container and add low grade fuel
+            var fuelSystem = vehicle.GetFuelSystem();
+            if (fuelSystem != null)
+            {
+                var fuelContainer = fuelSystem.GetFuelContainer();
+                if (fuelContainer?.inventory != null)
+                {
+                    var fuelItem = ItemManager.CreateByName("lowgradefuel", 100);
+                    if (fuelItem != null && !fuelItem.MoveToContainer(fuelContainer.inventory))
+                    {
+                        fuelItem.Remove();
+                    }
+                }
+            }
             
             DriveByEvent ev = new DriveByEvent
             {
