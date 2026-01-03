@@ -7,8 +7,8 @@ using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "1.8.0")]
-    [Description("Premium AI drive-bys: drive-by shooting, chase mode, U-turn, return, then dismount attack. Improved steering and alternating fire.")]
+    [Info("DriveBy", "Gemini", "2.0.0")]
+    [Description("Premium AI drive-bys: Free-roam chase mode - car constantly follows and chases player. Improved steering and alternating fire.")]
     public class DriveBy : RustPlugin
     {
         [PluginReference]
@@ -16,14 +16,10 @@ namespace Oxide.Plugins
 
         private enum DriveByPhase
         {
-            FirstPass,           // Initial drive-by shooting pass
-            UTurn,               // Doing U-turn
-            ReturnPass,          // Coming back towards target
-            Chasing,             // Chasing player if they run
+            Chasing,             // Car chasing player (main state)
             StoppingToDisembark, // Slowing down near target
             Dismounted,          // NPCs on foot shooting
-            Remounting,          // NPCs getting back in car
-            DrivingAway          // Car driving away to exit
+            Remounting           // NPCs getting back in car (then back to Chasing)
         }
 
         private class DriveByEvent
@@ -31,19 +27,16 @@ namespace Oxide.Plugins
             public BasicCar Vehicle;
             public List<ScientistNPC> Shooters = new List<ScientistNPC>();
             public Vector3 TargetPosition;
-            public Vector3 SpawnPosition;       // Where car started (for U-turn)
-            public Vector3 ExitPosition;
-            public Vector3 UTurnPoint;          // Point past target for U-turn
+            public Vector3 SpawnPosition;       // Where car started
             public Vector3 LastVehiclePos;      // For stuck detection
             public ulong TargetID;
             public string GangOwner;
-            public DriveByPhase Phase = DriveByPhase.FirstPass;
+            public DriveByPhase Phase = DriveByPhase.Chasing;
             public float PhaseTimer;
             public float StuckTimer;            // Time when vehicle got stuck
             public float LastShootTime;         // For periodic shooting
             public int LastShooterIndex;         // For alternating fire between NPCs
             public bool VehicleDestroyed = false;
-            public bool FirstPassComplete = false;
         }
 
         private List<DriveByEvent> _activeEvents = new List<DriveByEvent>();
@@ -71,9 +64,8 @@ namespace Oxide.Plugins
             {
                 ["Detection Interval (Seconds)"] = 30,
                 ["Cooldown per Player (Minutes)"] = 10,
-                ["Drive-By Pass Distance"] = 80f,    // How far past target before U-turn
                 ["Dismount Distance"] = 15f,         // How close to stop for dismount
-                ["Chase Distance"] = 40f,            // If player moves this far, chase them
+                ["Chase Distance"] = 40f,            // If player moves this far while dismounted, chase them
                 ["Shoot Duration (Seconds)"] = 10f,
                 ["Min Shoot Distance"] = 10f,         // Minimum distance to shoot
                 ["Max Shoot Distance"] = 60f,         // Maximum distance to shoot
@@ -228,7 +220,6 @@ namespace Oxide.Plugins
                 return;
             }
             
-            Vector3 exitPos = GetExitPosition(territoryGang, target.transform.position);
             // Face towards the target (flat rotation on Y axis only)
             Vector3 dirToTarget = (target.transform.position - spawnPos);
             dirToTarget.y = 0;
@@ -270,27 +261,15 @@ namespace Oxide.Plugins
                     return;
                 }
                 
-                // Calculate U-turn point (past target)
-                var settings = Config["Settings"] as Dictionary<string, object>;
-                float passDistance = settings != null && settings.ContainsKey("Drive-By Pass Distance") 
-                    ? Convert.ToSingle(settings["Drive-By Pass Distance"]) : 80f;
-                
-                Vector3 dirToTarget = (target.transform.position - spawnPos).normalized;
-                Vector3 uTurnPoint = target.transform.position + dirToTarget * passDistance;
-                uTurnPoint = GetFlatGroundPosition(uTurnPoint);
-                if (uTurnPoint == Vector3.zero) uTurnPoint = target.transform.position + dirToTarget * passDistance;
-                
                 DriveByEvent ev = new DriveByEvent
                 {
                     Vehicle = vehicle,
                     TargetPosition = target.transform.position,
                     SpawnPosition = spawnPos,
-                    UTurnPoint = uTurnPoint,
-                    ExitPosition = exitPos,
                     LastVehiclePos = spawnPos,
                     TargetID = target.userID,
                     GangOwner = territoryGang,
-                    Phase = DriveByPhase.FirstPass,
+                    Phase = DriveByPhase.Chasing,  // Start directly in chase mode
                     PhaseTimer = Time.realtimeSinceStartup,
                     StuckTimer = 0f,
                     LastShootTime = 0f,
@@ -522,6 +501,11 @@ namespace Oxide.Plugins
 
             npc.Spawn();
             Puts($"[DriveBy] NPC spawned: {npc.net?.ID}");
+            
+            // Make sure NPC can take damage
+            npc.InitializeHealth(150f, 150f);  // Health/MaxHealth
+            npc.startHealth = 150f;
+            
             npc.inventory.Strip();
 
             // Dress NPC in gang colors
@@ -666,64 +650,15 @@ namespace Oxide.Plugins
 
                 switch (ev.Phase)
                 {
-                    case DriveByPhase.FirstPass:
-                        // Drive past the target (drive-by shooting)
-                        // Update UTurn point to track player movement
-                        var firstPassSettings = Config["Settings"] as Dictionary<string, object>;
-                        float passDistance = firstPassSettings != null && firstPassSettings.ContainsKey("Drive-By Pass Distance") 
-                            ? Convert.ToSingle(firstPassSettings["Drive-By Pass Distance"]) : 80f;
-                        Vector3 dirToTarget = (ev.TargetPosition - ev.SpawnPosition).normalized;
-                        ev.UTurnPoint = ev.TargetPosition + dirToTarget * passDistance;
-                        
-                        DriveVehicle(ev, ev.UTurnPoint, maxSpeed);
-                        UpdateNPCTargets(ev);
-                        
-                        // Check if past target and near U-turn point
-                        float distToUTurn = Vector3.Distance(ev.Vehicle.transform.position, ev.UTurnPoint);
-                        if (distToUTurn < 30f)
-                        {
-                            ev.Phase = DriveByPhase.UTurn;
-                            ev.PhaseTimer = Time.realtimeSinceStartup;
-                        }
-                        break;
-                        
-                    case DriveByPhase.UTurn:
-                        // Slow down and turn around - keep targeting player's current position
-                        DriveVehicle(ev, ev.TargetPosition, maxSpeed * 0.6f);
-                        
-                        // Check if facing back towards target
-                        Vector3 toTarget = (ev.TargetPosition - ev.Vehicle.transform.position).normalized;
-                        float dotProduct = Vector3.Dot(ev.Vehicle.transform.forward, toTarget);
-                        if (dotProduct > 0.6f || Time.realtimeSinceStartup - ev.PhaseTimer > 4f)
-                        {
-                            ev.Phase = DriveByPhase.ReturnPass;
-                            ev.PhaseTimer = Time.realtimeSinceStartup;
-                        }
-                        break;
-                        
-                    case DriveByPhase.ReturnPass:
-                        // Drive back towards target - track player movement
-                        DriveVehicle(ev, ev.TargetPosition, maxSpeed);
-                        UpdateNPCTargets(ev);
-                        
-                        float distToTarget = Vector3.Distance(ev.Vehicle.transform.position, ev.TargetPosition);
-                        if (distToTarget <= dismountDist)
-                        {
-                            ev.Phase = DriveByPhase.StoppingToDisembark;
-                            ev.PhaseTimer = Time.realtimeSinceStartup;
-                            StopVehicle(ev);
-                        }
-                        break;
-                    
                     case DriveByPhase.Chasing:
-                        // Chase the player - stay mounted and shoot
+                        // Always chase the player - this is the main state
                         DriveVehicle(ev, ev.TargetPosition, maxSpeed);
                         UpdateNPCTargets(ev);
                         
                         float chaseDistToTarget = Vector3.Distance(ev.Vehicle.transform.position, ev.TargetPosition);
                         if (chaseDistToTarget <= dismountDist)
                         {
-                            // Caught up - dismount and fight
+                            // Close enough - dismount and fight
                             ev.Phase = DriveByPhase.StoppingToDisembark;
                             ev.PhaseTimer = Time.realtimeSinceStartup;
                             StopVehicle(ev);
@@ -753,10 +688,10 @@ namespace Oxide.Plugins
                             ev.Phase = DriveByPhase.Remounting;
                             ev.PhaseTimer = Time.realtimeSinceStartup;
                             RemountShooters(ev);
-                            // Will transition to Chasing after remount
                         }
                         else if (Time.realtimeSinceStartup - ev.PhaseTimer > shootDuration)
                         {
+                            // Shoot duration over - remount and chase again
                             ev.Phase = DriveByPhase.Remounting;
                             ev.PhaseTimer = Time.realtimeSinceStartup;
                             RemountShooters(ev);
@@ -768,32 +703,9 @@ namespace Oxide.Plugins
                         bool allMounted = ev.Shooters.All(s => s == null || s.IsDestroyed || s.IsMounted());
                         if (allMounted || Time.realtimeSinceStartup - ev.PhaseTimer > 3f)
                         {
-                            // Check if we should chase or leave
-                            float distAfterRemount = Vector3.Distance(ev.Vehicle.transform.position, ev.TargetPosition);
-                            if (distAfterRemount > chaseDist)
-                            {
-                                // Chase the player!
-                                ev.Phase = DriveByPhase.Chasing;
-                                ev.PhaseTimer = Time.realtimeSinceStartup;
-                            }
-                            else
-                            {
-                                ev.Phase = DriveByPhase.DrivingAway;
-                                ev.PhaseTimer = Time.realtimeSinceStartup;
-                            }
-                        }
-                        break;
-                        
-                    case DriveByPhase.DrivingAway:
-                        Vector3 exitGround = GetFlatGroundPosition(ev.ExitPosition);
-                        if (exitGround == Vector3.zero) exitGround = ev.ExitPosition;
-                        DriveVehicle(ev, exitGround, maxSpeed);
-                        
-                        // Check if reached exit
-                        if (Vector3.Distance(ev.Vehicle.transform.position, exitGround) < 50f)
-                        {
-                            CleanUpEvent(ev, true);
-                            _activeEvents.RemoveAt(i);
+                            // Always go back to chasing - never drive away!
+                            ev.Phase = DriveByPhase.Chasing;
+                            ev.PhaseTimer = Time.realtimeSinceStartup;
                         }
                         break;
                 }
