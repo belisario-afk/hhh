@@ -7,8 +7,8 @@ using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBy", "Gemini", "2.3.0")]
-    [Description("Premium AI drive-bys: brute-force car chase, escape despawn, destroys natural obstacles but never player builds.")]
+    [Info("DriveBy", "Gemini", "2.4.0")]
+    [Description("Premium AI drive-bys: brute-force car chase, improved stuck recovery, escape despawn, destroys natural obstacles but never player builds.")]
     public class DriveBy : RustPlugin
     {
         [PluginReference]
@@ -34,10 +34,14 @@ namespace Oxide.Plugins
             public DriveByPhase Phase = DriveByPhase.Chasing;
             public float PhaseTimer;
             public float StuckTimer;            // Time when vehicle got stuck
+            public float TotalStuckTime;        // Total accumulated stuck time for aggressive recovery
             public float LastShootTime;         // For periodic shooting
             public int LastShooterIndex;        // For alternating fire between NPCs
             public bool VehicleDestroyed = false;
             public float LastGoodFacingTime;    // Last time vehicle was roughly facing target
+            public List<Vector3> PositionHistory = new List<Vector3>(); // Track positions for area-stuck detection
+            public float LastPositionRecordTime; // When we last recorded position
+            public int StuckRecoveryAttempts;   // Count recovery attempts for escalating response
         }
 
         private List<DriveByEvent> _activeEvents = new List<DriveByEvent>();
@@ -428,9 +432,13 @@ namespace Oxide.Plugins
                     Phase = DriveByPhase.Chasing,
                     PhaseTimer = Time.realtimeSinceStartup,
                     StuckTimer = 0f,
+                    TotalStuckTime = 0f,
                     LastShootTime = 0f,
                     LastShooterIndex = 0,
-                    LastGoodFacingTime = Time.realtimeSinceStartup
+                    LastGoodFacingTime = Time.realtimeSinceStartup,
+                    PositionHistory = new List<Vector3> { spawnPos },
+                    LastPositionRecordTime = Time.realtimeSinceStartup,
+                    StuckRecoveryAttempts = 0
                 };
 
                 if (vehicle.net != null)
@@ -519,16 +527,16 @@ namespace Oxide.Plugins
                 basePos.x = Mathf.Clamp(basePos.x, -worldSize + 50f, worldSize - 50f);
                 basePos.z = Mathf.Clamp(basePos.z, -worldSize + 50f, worldSize - 50f);
 
-                for (int i = 0; i < 15; i++)
+                for (int i = 0; i < 20; i++) // Increased attempts
                 {
                     Vector3 testPos = basePos + new Vector3(
-                        UnityEngine.Random.Range(-30f, 30f),
+                        UnityEngine.Random.Range(-35f, 35f),
                         0,
-                        UnityEngine.Random.Range(-30f, 30f)
+                        UnityEngine.Random.Range(-35f, 35f)
                     );
 
                     testPos = GetFlatGroundPosition(testPos);
-                    if (testPos != Vector3.zero && !IsInWater(testPos) && IsFlatEnough(testPos))
+                    if (testPos != Vector3.zero && !IsInWater(testPos) && IsFlatEnough(testPos) && HasClearArea(testPos))
                     {
                         Puts($"[DriveBy] Found valid spawn at dist {distFromTarget}: {testPos}");
                         return testPos;
@@ -536,7 +544,7 @@ namespace Oxide.Plugins
                 }
             }
 
-            for (int i = 0; i < 20; i++)
+            for (int i = 0; i < 30; i++) // Increased attempts
             {
                 Vector3 testPos = targetPos + new Vector3(
                     UnityEngine.Random.Range(-100f, 100f),
@@ -545,7 +553,7 @@ namespace Oxide.Plugins
                 );
 
                 testPos = GetFlatGroundPosition(testPos);
-                if (testPos != Vector3.zero && !IsInWater(testPos) && IsFlatEnough(testPos))
+                if (testPos != Vector3.zero && !IsInWater(testPos) && IsFlatEnough(testPos) && HasClearArea(testPos))
                 {
                     Puts($"[DriveBy] Found fallback spawn near target: {testPos}");
                     return testPos;
@@ -587,9 +595,35 @@ namespace Oxide.Plugins
             if (Physics.Raycast(pos + Vector3.up * 2f, Vector3.down, out hit, 5f, LayerMask.GetMask("Terrain")))
             {
                 float angle = Vector3.Angle(hit.normal, Vector3.up);
-                return angle < 20f;
+                return angle < 15f; // More strict - was 20f, now 15f for better spawn positions
             }
             return true;
+        }
+        
+        /// <summary>
+        /// Check if a spawn position has clear area around it (not surrounded by rocks/cliffs)
+        /// </summary>
+        private bool HasClearArea(Vector3 pos, float radius = 8f)
+        {
+            int blockedDirections = 0;
+            Vector3[] checkDirs = { Vector3.forward, Vector3.back, Vector3.left, Vector3.right };
+            
+            foreach (var dir in checkDirs)
+            {
+                RaycastHit hit;
+                if (Physics.Raycast(pos + Vector3.up * 1f, dir, out hit, radius, LayerMask.GetMask("World", "Construction", "Terrain")))
+                {
+                    // Check if it's a steep cliff/rock
+                    float angle = Vector3.Angle(hit.normal, Vector3.up);
+                    if (angle > 45f)
+                    {
+                        blockedDirections++;
+                    }
+                }
+            }
+            
+            // Must have at least 2 clear directions
+            return blockedDirections <= 2;
         }
 
         private Vector3 GetExitPosition(string gang, Vector3 targetPos)
@@ -890,21 +924,71 @@ namespace Oxide.Plugins
                 DestroyObstaclesInFront(ev);
                 MakeNPCsShootFromVehicle(ev);
 
-                float distMoved = Vector3.Distance(ev.Vehicle.transform.position, ev.LastVehiclePos);
-                if (distMoved < 0.5f && ev.Phase == DriveByPhase.Chasing)
+                // === IMPROVED STUCK DETECTION ===
+                Vector3 currentPos = ev.Vehicle.transform.position;
+                float distMoved = Vector3.Distance(currentPos, ev.LastVehiclePos);
+                
+                // Record position every 1 second for area-stuck detection
+                if (Time.realtimeSinceStartup - ev.LastPositionRecordTime > 1f)
+                {
+                    ev.PositionHistory.Add(currentPos);
+                    ev.LastPositionRecordTime = Time.realtimeSinceStartup;
+                    
+                    // Keep only last 10 positions (10 seconds of history)
+                    while (ev.PositionHistory.Count > 10)
+                        ev.PositionHistory.RemoveAt(0);
+                }
+                
+                // Check if stuck in same small area (within 5m radius for 7+ seconds)
+                bool stuckInSmallArea = false;
+                if (ev.PositionHistory.Count >= 7 && ev.Phase == DriveByPhase.Chasing)
+                {
+                    float maxDistFromFirst = 0f;
+                    Vector3 firstPos = ev.PositionHistory[0];
+                    foreach (var pos in ev.PositionHistory)
+                    {
+                        float dist = Vector3.Distance(firstPos, pos);
+                        if (dist > maxDistFromFirst) maxDistFromFirst = dist;
+                    }
+                    stuckInSmallArea = maxDistFromFirst < 5f; // All positions within 5m radius
+                }
+                
+                if ((distMoved < 0.5f || stuckInSmallArea) && ev.Phase == DriveByPhase.Chasing)
                 {
                     if (ev.StuckTimer == 0f)
                         ev.StuckTimer = Time.realtimeSinceStartup;
-                    else if (Time.realtimeSinceStartup - ev.StuckTimer > stuckRecoveryTime)
+                    
+                    float currentStuckDuration = Time.realtimeSinceStartup - ev.StuckTimer;
+                    ev.TotalStuckTime += 0.2f; // Add tick time
+                    
+                    // Force teleport after 7 seconds stuck in same area OR 4+ recovery attempts
+                    if (stuckInSmallArea && (ev.TotalStuckTime > 7f || ev.StuckRecoveryAttempts >= 4))
+                    {
+                        Puts($"[DriveBy] Vehicle stuck in same area for {ev.TotalStuckTime:F1}s, FORCE TELEPORTING to player vicinity!");
+                        ForceTeleportToPlayer(ev);
+                        ev.StuckTimer = 0f;
+                        ev.TotalStuckTime = 0f;
+                        ev.StuckRecoveryAttempts = 0;
+                        ev.PositionHistory.Clear();
+                        ev.PositionHistory.Add(ev.Vehicle.transform.position);
+                    }
+                    else if (currentStuckDuration > stuckRecoveryTime)
                     {
                         RecoverFromStuck(ev);
+                        ev.StuckRecoveryAttempts++;
                         ev.StuckTimer = 0f;
                     }
                 }
                 else
                 {
+                    // Making progress - reset stuck tracking
+                    if (distMoved > 2f) // Meaningful movement
+                    {
+                        ev.TotalStuckTime = 0f;
+                        ev.StuckRecoveryAttempts = 0;
+                    }
                     ev.StuckTimer = 0f;
-                    ev.LastVehiclePos = ev.Vehicle.transform.position;
+                    ev.LastVehiclePos = currentPos;
                 }
 
                 switch (ev.Phase)
@@ -1021,7 +1105,7 @@ namespace Oxide.Plugins
         {
             if (ev.Vehicle == null || ev.Vehicle.IsDestroyed) return;
 
-            Puts($"[DriveBy] Vehicle stuck, attempting recovery...");
+            Puts($"[DriveBy] Vehicle stuck, attempting recovery (attempt #{ev.StuckRecoveryAttempts + 1})...");
 
             var rb = ev.Vehicle.GetComponent<Rigidbody>();
             if (rb == null) return;
@@ -1037,92 +1121,212 @@ namespace Oxide.Plugins
             bool waterLeft = IsWaterAhead(vehiclePos, -right, 8f);
             bool waterRight = IsWaterAhead(vehiclePos, right, 8f);
             bool waterAhead = IsWaterAhead(vehiclePos, forward, 10f);
+            
+            // Check for obstacles in all directions
+            bool obstacleAhead = ShouldAvoidAhead(vehiclePos, forward);
+            bool obstacleLeft = ShouldAvoidAhead(vehiclePos, -right);
+            bool obstacleRight = ShouldAvoidAhead(vehiclePos, right);
+            bool obstacleBehind = ShouldAvoidAhead(vehiclePos, backward);
 
-            if (stuckDuration < 2f)
+            // Stage 1: Quick burst in best available direction
+            if (stuckDuration < 2f || ev.StuckRecoveryAttempts < 2)
             {
-                if (!waterBehind)
+                // Try to find best direction
+                Vector3 bestDir = Vector3.zero;
+                float bestScore = -1000f;
+                
+                // Score each direction based on: no water, no obstacles, facing target
+                Vector3 toTarget = (ev.TargetPosition - vehiclePos).normalized;
+                
+                var directions = new (Vector3 dir, bool hasWater, bool hasObstacle)[] {
+                    (forward, waterAhead, obstacleAhead),
+                    (backward, waterBehind, obstacleBehind),
+                    (right, waterRight, obstacleRight),
+                    (-right, waterLeft, obstacleLeft),
+                    ((forward + right).normalized, waterAhead || waterRight, obstacleAhead || obstacleRight),
+                    ((forward - right).normalized, waterAhead || waterLeft, obstacleAhead || obstacleLeft),
+                    ((backward + right).normalized, waterBehind || waterRight, obstacleBehind || obstacleRight),
+                    ((backward - right).normalized, waterBehind || waterLeft, obstacleBehind || obstacleLeft)
+                };
+                
+                foreach (var (dir, hasWater, hasObstacle) in directions)
                 {
-                    rb.velocity = backward * 6f;
-                    float turnDir = UnityEngine.Random.value > 0.5f ? 1f : -1f;
-                    if (turnDir > 0 && waterRight) turnDir = -1f;
-                    if (turnDir < 0 && waterLeft) turnDir = 1f;
-                    rb.AddTorque(Vector3.up * turnDir * 400f, ForceMode.Impulse);
-                }
-                else
-                {
-                    float turnDir = !waterRight ? 1f : (!waterLeft ? -1f : 0f);
-                    rb.AddTorque(Vector3.up * turnDir * 600f, ForceMode.Impulse);
-                    if (!waterAhead)
+                    float score = Vector3.Dot(dir, toTarget) * 10f; // Prefer directions toward target
+                    if (hasWater) score -= 100f;
+                    if (hasObstacle) score -= 50f;
+                    
+                    if (score > bestScore)
                     {
-                        rb.velocity = forward * 4f;
+                        bestScore = score;
+                        bestDir = dir;
                     }
                 }
-            }
-            else if (stuckDuration < 4f)
-            {
-                if (!waterBehind)
+                
+                if (bestDir != Vector3.zero)
                 {
-                    rb.velocity = backward * 8f;
-                    float turnDir = !waterRight ? 1f : (!waterLeft ? -1f : (UnityEngine.Random.value > 0.5f ? 1f : -1f));
-                    rb.AddTorque(Vector3.up * turnDir * 600f, ForceMode.Impulse);
+                    rb.velocity = bestDir * 7f;
+                    
+                    // Turn to face target while moving
+                    float turnToTarget = Vector3.SignedAngle(forward, toTarget, Vector3.up);
+                    float turnDir = turnToTarget > 0 ? 1f : -1f;
+                    rb.AddTorque(Vector3.up * turnDir * 500f, ForceMode.Impulse);
                 }
-                else
+            }
+            // Stage 2: More aggressive maneuver
+            else if (stuckDuration < 4f || ev.StuckRecoveryAttempts < 4)
+            {
+                // Try a 3-point turn style maneuver
+                if (!waterBehind && !obstacleBehind)
                 {
-                    float turnDir = !waterRight ? 1f : (!waterLeft ? -1f : 0f);
+                    rb.velocity = backward * 10f;
+                    float turnDir = !waterRight && !obstacleRight ? 1f : (!waterLeft && !obstacleLeft ? -1f : (UnityEngine.Random.value > 0.5f ? 1f : -1f));
                     rb.AddTorque(Vector3.up * turnDir * 800f, ForceMode.Impulse);
-                    if (!waterAhead)
+                }
+                else if (!waterAhead && !obstacleAhead)
+                {
+                    rb.velocity = forward * 8f;
+                    rb.AddTorque(Vector3.up * (UnityEngine.Random.value > 0.5f ? 1f : -1f) * 600f, ForceMode.Impulse);
+                }
+                else
+                {
+                    // Try sideways
+                    if (!waterRight && !obstacleRight)
                     {
-                        rb.velocity = forward * 6f;
+                        rb.velocity = right * 6f;
+                        rb.AddTorque(Vector3.up * -1f * 700f, ForceMode.Impulse);
+                    }
+                    else if (!waterLeft && !obstacleLeft)
+                    {
+                        rb.velocity = -right * 6f;
+                        rb.AddTorque(Vector3.up * 1f * 700f, ForceMode.Impulse);
                     }
                 }
             }
+            // Stage 3: Teleport
             else
             {
-                Vector3 toTarget = (ev.TargetPosition - vehiclePos).normalized;
-
-                for (int i = 0; i < 10; i++)
+                TeleportToSafePosition(ev, vehiclePos, rb);
+            }
+        }
+        
+        /// <summary>
+        /// Force teleport the vehicle near the player when stuck for too long.
+        /// More aggressive than regular teleport - goes directly near target.
+        /// </summary>
+        private void ForceTeleportToPlayer(DriveByEvent ev)
+        {
+            if (ev.Vehicle == null || ev.Vehicle.IsDestroyed) return;
+            
+            var rb = ev.Vehicle.GetComponent<Rigidbody>();
+            if (rb == null) return;
+            
+            Puts($"[DriveBy] FORCE TELEPORTING vehicle to player vicinity!");
+            
+            // Try to find a good spot 30-50m from the player
+            for (int i = 0; i < 20; i++)
+            {
+                float dist = UnityEngine.Random.Range(30f, 50f);
+                float angle = UnityEngine.Random.Range(0f, 360f) * Mathf.Deg2Rad;
+                
+                Vector3 offset = new Vector3(Mathf.Cos(angle) * dist, 0, Mathf.Sin(angle) * dist);
+                Vector3 testPos = ev.TargetPosition + offset;
+                Vector3 groundPos = GetFlatGroundPosition(testPos);
+                
+                if (groundPos != Vector3.zero && !IsInWater(groundPos) && IsFlatEnough(groundPos))
                 {
-                    Vector3 offset = toTarget * 15f + new Vector3(
-                        UnityEngine.Random.Range(-10f, 10f),
-                        3f,
-                        UnityEngine.Random.Range(-10f, 10f)
-                    );
-                    Vector3 testPos = vehiclePos + offset;
-                    Vector3 groundPos = GetFlatGroundPosition(testPos);
-
-                    if (groundPos != Vector3.zero && !IsInWater(groundPos) && IsFlatEnough(groundPos))
+                    if (groundPos.y > WaterSystem.OceanLevel + 3f)
                     {
-                        if (groundPos.y > WaterSystem.OceanLevel + 3f)
+                        // Face toward the target
+                        Vector3 lookDir = (ev.TargetPosition - groundPos);
+                        lookDir.y = 0;
+                        if (lookDir.magnitude > 1f)
                         {
-                            Vector3 lookDir = (ev.TargetPosition - groundPos);
-                            lookDir.y = 0;
-                            if (lookDir.magnitude > 1f)
-                            {
-                                ev.Vehicle.transform.rotation = Quaternion.LookRotation(lookDir.normalized);
-                            }
-
-                            ev.Vehicle.transform.position = groundPos;
-                            rb.velocity = VectorZero();
-                            rb.angularVelocity = VectorZero();
-
-                            Puts($"[DriveBy] Teleported vehicle to safe position {groundPos}");
-                            ev.StuckTimer = 0f;
-                            return;
+                            ev.Vehicle.transform.rotation = Quaternion.LookRotation(lookDir.normalized);
                         }
+                        
+                        ev.Vehicle.transform.position = groundPos;
+                        rb.velocity = VectorZero();
+                        rb.angularVelocity = VectorZero();
+                        
+                        Puts($"[DriveBy] FORCE teleported vehicle to {groundPos}, {Vector3.Distance(groundPos, ev.TargetPosition):F1}m from target");
+                        return;
                     }
                 }
-
-                Puts($"[DriveBy] Could not find valid teleport position away from water!");
-                Vector3 nearTarget = ev.TargetPosition + new Vector3(UnityEngine.Random.Range(-20f, 20f), 0, UnityEngine.Random.Range(-20f, 20f));
-                Vector3 safePos = GetFlatGroundPosition(nearTarget);
-                if (safePos != Vector3.zero && safePos.y > WaterSystem.OceanLevel + 3f)
+            }
+            
+            // Fallback: teleport very close to target
+            Vector3 nearTarget = ev.TargetPosition + new Vector3(UnityEngine.Random.Range(-25f, 25f), 0, UnityEngine.Random.Range(-25f, 25f));
+            Vector3 safePos = GetFlatGroundPosition(nearTarget);
+            if (safePos != Vector3.zero && safePos.y > WaterSystem.OceanLevel + 2f)
+            {
+                Vector3 lookDir = (ev.TargetPosition - safePos);
+                lookDir.y = 0;
+                if (lookDir.magnitude > 1f)
                 {
-                    ev.Vehicle.transform.position = safePos;
-                    rb.velocity = VectorZero();
-                    rb.angularVelocity = VectorZero();
-                    Puts($"[DriveBy] Emergency teleport to {safePos}");
-                    ev.StuckTimer = 0f;
+                    ev.Vehicle.transform.rotation = Quaternion.LookRotation(lookDir.normalized);
                 }
+                
+                ev.Vehicle.transform.position = safePos;
+                rb.velocity = VectorZero();
+                rb.angularVelocity = VectorZero();
+                Puts($"[DriveBy] FORCE emergency teleport to {safePos}");
+            }
+        }
+        
+        /// <summary>
+        /// Helper to teleport vehicle to a safe position
+        /// </summary>
+        private void TeleportToSafePosition(DriveByEvent ev, Vector3 vehiclePos, Rigidbody rb)
+        {
+            Vector3 toTarget = (ev.TargetPosition - vehiclePos).normalized;
+
+            for (int i = 0; i < 15; i++)
+            {
+                Vector3 offset = toTarget * 15f + new Vector3(
+                    UnityEngine.Random.Range(-12f, 12f),
+                    3f,
+                    UnityEngine.Random.Range(-12f, 12f)
+                );
+                Vector3 testPos = vehiclePos + offset;
+                Vector3 groundPos = GetFlatGroundPosition(testPos);
+
+                if (groundPos != Vector3.zero && !IsInWater(groundPos) && IsFlatEnough(groundPos))
+                {
+                    if (groundPos.y > WaterSystem.OceanLevel + 3f)
+                    {
+                        Vector3 lookDir = (ev.TargetPosition - groundPos);
+                        lookDir.y = 0;
+                        if (lookDir.magnitude > 1f)
+                        {
+                            ev.Vehicle.transform.rotation = Quaternion.LookRotation(lookDir.normalized);
+                        }
+
+                        ev.Vehicle.transform.position = groundPos;
+                        rb.velocity = VectorZero();
+                        rb.angularVelocity = VectorZero();
+
+                        Puts($"[DriveBy] Teleported vehicle to safe position {groundPos}");
+                        return;
+                    }
+                }
+            }
+
+            Puts($"[DriveBy] Could not find valid teleport position, trying near target...");
+            Vector3 nearTarget = ev.TargetPosition + new Vector3(UnityEngine.Random.Range(-20f, 20f), 0, UnityEngine.Random.Range(-20f, 20f));
+            Vector3 safePos = GetFlatGroundPosition(nearTarget);
+            if (safePos != Vector3.zero && safePos.y > WaterSystem.OceanLevel + 3f)
+            {
+                Vector3 lookDir = (ev.TargetPosition - safePos);
+                lookDir.y = 0;
+                if (lookDir.magnitude > 1f)
+                {
+                    ev.Vehicle.transform.rotation = Quaternion.LookRotation(lookDir.normalized);
+                }
+                
+                ev.Vehicle.transform.position = safePos;
+                rb.velocity = VectorZero();
+                rb.angularVelocity = VectorZero();
+                Puts($"[DriveBy] Emergency teleport to {safePos}");
             }
         }
 
